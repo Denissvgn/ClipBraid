@@ -4,7 +4,7 @@ import { expression } from "../source-probes.mjs";
 import { openEditor, loadDraft, saveDraft } from "./helpers.mjs";
 import { asset, draft, openProbe } from "./fixtures.mjs";
 
-test("rejected malformed draft preserves the current source URL [known-broken project validation]", async ({
+test("rejected malformed draft preserves the current source URL", async ({
   page,
 }, info) => {
   await openEditor(page);
@@ -28,13 +28,10 @@ test("rejected malformed draft preserves the current source URL [known-broken pr
     body: JSON.stringify({ fetchable }),
     contentType: "application/json",
   });
-  test.fail(true, "invalid load currently revokes live media");
   expect(fetchable).toBe(true);
 });
 
-test("one audible preview source per clip [known-broken preview audio]", async ({
-  page,
-}, info) => {
+test("one audible preview source per clip", async ({ page }, info) => {
   await page.addInitScript(() => {
     window.playedMedia = new Set();
     const play = HTMLMediaElement.prototype.play;
@@ -61,7 +58,6 @@ test("one audible preview source per clip [known-broken preview audio]", async (
     body: JSON.stringify(sources),
     contentType: "application/json",
   });
-  test.fail(true, "video and AudioEngine are both audible");
   expect(sources).toHaveLength(1);
 });
 
@@ -103,9 +99,7 @@ test("editor actions remain reachable at phone, tablet and laptop widths", async
   });
 });
 
-test("mixed PCM ends at clip trim [known-broken trim boundaries]", async ({
-  context,
-}, info) => {
+test("mixed PCM ends at clip trim", async ({ context }, info) => {
   const page = await openProbe(context);
   const clip = await asset("bars-fractional-av.mp4", {
     trimStart: 0.105,
@@ -152,7 +146,6 @@ test("mixed PCM ends at clip trim [known-broken trim boundaries]", async ({
     body: JSON.stringify(result),
     contentType: "application/json",
   });
-  test.fail(true, "decoded AAC chunks extend past the trim end");
   expect(result.after).toBeLessThan(0.001);
 });
 
@@ -226,7 +219,7 @@ test("fractional fps, rotation, PCM windows and corrupt formats use real probes"
   expect(results[4].impulse).toBeGreaterThan(0.79);
 });
 
-test("contain margins clear after a landscape-to-portrait cut [known-broken canvas clearing]", async ({
+test("contain margins clear after a landscape-to-portrait cut", async ({
   context,
 }, info) => {
   const page = await openProbe(context);
@@ -247,7 +240,11 @@ test("contain margins clear after a landscape-to-portrait cut [known-broken canv
             type: c.mimeType,
           }),
         );
-      const opacityAt = new Function("nextAssetOf", opacity)(new Map());
+      const opacityAt = new Function(
+        "createOpacitySampler",
+        "mediaAssets",
+        opacity,
+      )(window.testRuntime.timeline.createOpacitySampler, clips);
       const scope = {
         ...m,
         mediaAssets: clips,
@@ -297,6 +294,5 @@ test("contain margins clear after a landscape-to-portrait cut [known-broken canv
     body: JSON.stringify(result),
     contentType: "application/json",
   });
-  test.fail(true, "prior red frame remains in contain margins");
   expect(Math.max(...result.margin.slice(0, 3))).toBeLessThan(15);
 });

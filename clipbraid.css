@@ -1,6 +1,4 @@
-/* Hallmark · macrostructure: Workbench · genre: modern-minimal · theme: ClipBraid
- * tone: calm and capable · anchor hue: deep green · enrichment: none
- * pre-emit critique: P4 H4 E4 S5 R5 V4 · contrast and responsive controls reviewed */
+/* ClipBraid editor layout and responsive controls. */
 .editor-app {
   min-height: 100dvh;
   display: flex;
@@ -991,6 +989,15 @@ input[type="range"]::-moz-range-thumb {
   }
   .editor-workspace {
     min-height: 0;
+  }
+  .preview-workspace,
+  .preview-stage,
+  .preview-surface {
+    min-height: 0;
+  }
+  .preview-heading,
+  .playback-toolbar {
+    flex-shrink: 0;
   }
   .editor-inspector {
     gap: var(--space-lg);

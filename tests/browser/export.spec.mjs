@@ -81,6 +81,7 @@ test("one-second repeated-source real AVC encode, AAC mux and browser download",
       height: await v.getCodedHeight(),
       videoCodec: await v.getCodec(),
       audioCodec: await a.getCodec(),
+      fps: (await v.computeFrameRateMetrics()).bestGuessFrameRate,
       frames,
       silence: rms(0.02, 0.06),
       tone: rms(0.22, 0.38),
@@ -102,13 +103,15 @@ test("one-second repeated-source real AVC encode, AAC mux and browser download",
       Math.max(...pixel.slice(0, 3)) - Math.min(...pixel.slice(0, 3)),
     ).toBeLessThan(25);
   }
+  expect(media.fps).toBeCloseTo(30000 / 1001, 2);
   expect(media.silence).toBeLessThan(0.005);
   expect(media.tone).toBeGreaterThan(0.08);
   await info.attach("output-evidence", {
     body: JSON.stringify(
       {
         jobId: `${process.env.CLIPBRAID_RUN_ID ?? "manual"}:${info.testId}`,
-        jobIdentitySource: "harness-run/test identity; not a production export-job identity",
+        jobIdentitySource:
+          "harness-run/test identity; not a production export-job identity",
         bytes: bytes.length,
         sha256: createHash("sha256").update(bytes).digest("hex"),
         ...media,
@@ -122,7 +125,7 @@ test("one-second repeated-source real AVC encode, AAC mux and browser download",
   });
 });
 
-test("corrupt visual prevents a successful download [known-broken asset failures]", async ({
+test("corrupt visual prevents a successful download", async ({
   page,
 }, info) => {
   await openEditor(page);
@@ -141,9 +144,5 @@ test("corrupt visual prevents a successful download [known-broken asset failures
     body: JSON.stringify({ result }),
     contentType: "application/json",
   });
-  test.fail(
-    true,
-    "failed media is omitted and a black video can be downloaded",
-  );
   expect(result).toBe("explicit-error");
 });

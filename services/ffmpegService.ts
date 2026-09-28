@@ -1,85 +1,177 @@
-import { toBlobURL } from '@ffmpeg/util';
-/**
- * FFmpeg WASM service using a classic worker.
- * Bypasses CORS issues in the Flow sandbox.
- */
+/** Owns one FFmpeg worker and settles every operation when that worker fails. */
 const MSG = {
-  LOAD: 'LOAD', EXEC: 'EXEC', WRITE_FILE: 'WRITE_FILE',
-  READ_FILE: 'READ_FILE', DELETE_FILE: 'DELETE_FILE',
-  ERROR: 'ERROR', LOG: 'LOG', PROGRESS: 'PROGRESS',
+  LOAD: "LOAD",
+  EXEC: "EXEC",
+  WRITE_FILE: "WRITE_FILE",
+  READ_FILE: "READ_FILE",
+  DELETE_FILE: "DELETE_FILE",
+  ERROR: "ERROR",
+  LOG: "LOG",
+  PROGRESS: "PROGRESS",
 } as const;
-// Primary and fallback CDN URLs
 const CDNS = [
-  'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd',
-  'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd',
-  'https://cdn.jsdelivr.net/gh/ffmpegwasm/core@0.12.6/dist/umd' // Github fallback
+  "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd",
+  "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd",
+  "https://cdn.jsdelivr.net/gh/ffmpegwasm/core@0.12.6/dist/umd",
 ];
-class FFmpegService {
+type Timeouts = { fetchMs: number; loadMs: number; operationMs: number };
+export class FFmpegService {
   private worker: Worker | null = null;
   private loaded = false;
+  private loading: Promise<void> | null = null;
   private msgId = 0;
-  private callbacks = new Map<number, {
-    resolve: (v: any) => void;
-    reject: (e: any) => void;
-  }>();
+  private urls = new Map<Worker, string[]>();
+  private callbacks = new Map<
+    number,
+    {
+      worker: Worker;
+      resolve: (v: any) => void;
+      reject: (e: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
   private logCb: ((msg: string) => void) | null = null;
   private progressCb: ((p: { progress: number }) => void) | null = null;
-  async load(onLog?: (msg: string) => void) {
-    if (this.loaded && this.worker) return;
-    this.logCb = onLog || null;
-    let error: any = null;
+  private timeouts: Timeouts;
+  constructor(timeouts: Partial<Timeouts> = {}) {
+    this.timeouts = {
+      fetchMs: 30_000,
+      loadMs: 45_000,
+      operationMs: 300_000,
+      ...timeouts,
+    };
+  }
+  load(onLog?: (msg: string) => void): Promise<void> {
+    if (onLog) this.logCb = onLog;
+    if (this.loaded && this.worker) return Promise.resolve();
+    if (!this.loading) {
+      this.loading = this.loadWorker().finally(() => {
+        this.loading = null;
+      });
+    }
+    return this.loading;
+  }
+  private reset(worker: Worker, error: Error) {
+    if (this.worker !== worker && !this.urls.has(worker)) return;
+    if (this.worker === worker) {
+      this.worker = null;
+      this.loaded = false;
+    }
+    worker.onmessage = null;
+    worker.onerror = null;
+    worker.onmessageerror = null;
+    worker.terminate();
+    for (const [id, callback] of this.callbacks) {
+      if (callback.worker !== worker) continue;
+      clearTimeout(callback.timer);
+      this.callbacks.delete(id);
+      callback.reject(error);
+    }
+    this.urls.get(worker)?.forEach((url) => URL.revokeObjectURL(url));
+    this.urls.delete(worker);
+  }
+  private async loadWorker(): Promise<void> {
+    let error: unknown;
     for (const baseURL of CDNS) {
+      const urls: string[] = [];
+      let worker: Worker | undefined;
       try {
         this.logCb?.(`Connecting to ${new URL(baseURL).hostname}...`);
-
-        const coreURL = await toBlobURL(
-          `${baseURL}/ffmpeg-core.js`, 'text/javascript'
+        const fetchAsset = async (name: string, type: string) => {
+          const response = await fetch(`${baseURL}/${name}`, {
+            signal: AbortSignal.timeout(this.timeouts.fetchMs),
+          });
+          if (!response.ok)
+            throw new Error(`FFmpeg asset HTTP ${response.status}: ${name}`);
+          const bytes = await response.arrayBuffer();
+          if (!bytes.byteLength) throw new Error(`Empty FFmpeg asset: ${name}`);
+          const url = URL.createObjectURL(new Blob([bytes], { type }));
+          urls.push(url);
+          return url;
+        };
+        const coreURL = await fetchAsset("ffmpeg-core.js", "text/javascript");
+        const wasmURL = await fetchAsset(
+          "ffmpeg-core.wasm",
+          "application/wasm",
         );
-        const wasmURL = await toBlobURL(
-          `${baseURL}/ffmpeg-core.wasm`, 'application/wasm'
-        );
-        this.logCb?.(`Assets fetched. Spawning worker...`);
-        const workerBlob = this.buildWorkerBlob();
-        this.worker = new Worker(workerBlob);
-        this.worker.onmessage = ({ data: { id, type, data } }) => {
+        const workerURL = this.buildWorkerBlob();
+        urls.push(workerURL);
+        worker = new Worker(workerURL);
+        const attempt = worker;
+        this.worker = attempt;
+        this.urls.set(attempt, urls);
+        attempt.onmessage = ({ data: { id, type, data } }) => {
+          if (this.worker !== attempt) return;
           if (type === MSG.LOG) {
-            this.logCb?.(data?.message || '');
+            this.logCb?.(data?.message || "");
             return;
           }
           if (type === MSG.PROGRESS) {
             this.progressCb?.(data);
             return;
           }
-          if (type === MSG.ERROR) {
-            const cb = this.callbacks.get(id);
-            if (cb) { this.callbacks.delete(id); cb.reject(new Error(data)); }
-            return;
-          }
-          const cb = this.callbacks.get(id);
-          if (cb) { this.callbacks.delete(id); cb.resolve(data); }
+          const callback = this.callbacks.get(id);
+          if (!callback || callback.worker !== attempt) return;
+          clearTimeout(callback.timer);
+          this.callbacks.delete(id);
+          if (type === MSG.ERROR) callback.reject(new Error(String(data)));
+          else callback.resolve(data);
         };
-        await this.send(MSG.LOAD, { coreURL, wasmURL });
+        attempt.onerror = (event) => {
+          event.preventDefault?.();
+          this.reset(
+            attempt,
+            new Error(event.message || "FFmpeg worker crashed"),
+          );
+        };
+        attempt.onmessageerror = () =>
+          this.reset(
+            attempt,
+            new Error("FFmpeg worker message could not be decoded"),
+          );
+        await this.send(MSG.LOAD, { coreURL, wasmURL }, [], attempt);
+        if (this.worker !== attempt)
+          throw new Error("FFmpeg worker stopped during initialization");
         this.loaded = true;
-        this.logCb?.(`FFmpeg Initialized.`);
+        this.logCb?.("FFmpeg Initialized.");
         return;
-      } catch (e) {
-        console.warn(`Failed to load from ${baseURL}:`, e);
-        error = e;
-        if (this.worker) {
-          this.worker.terminate();
-          this.worker = null;
-        }
-        continue;
+      } catch (cause) {
+        error = cause;
+        if (worker)
+          this.reset(
+            worker,
+            cause instanceof Error ? cause : new Error(String(cause)),
+          );
+        else urls.forEach((url) => URL.revokeObjectURL(url));
       }
     }
-    throw new Error(`FFmpeg failed to load: ${error?.message || 'Check connection'}`);
+    throw new Error(
+      `FFmpeg failed to load: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
-  private send(type: string, data?: any, transfer?: Transferable[]): Promise<any> {
+  private send(
+    type: string,
+    data?: any,
+    transfer: Transferable[] = [],
+    worker = this.worker,
+  ): Promise<any> {
     return new Promise((resolve, reject) => {
-      if (!this.worker) return reject(new Error('FFmpeg not initialized'));
+      if (!worker || (type !== MSG.LOAD && !this.loaded))
+        return reject(new Error("FFmpeg not initialized; retry loading"));
       const id = this.msgId++;
-      this.callbacks.set(id, { resolve, reject });
-      this.worker.postMessage({ id, type, data }, transfer || []);
+      const timer = setTimeout(
+        () => this.reset(worker, new Error(`FFmpeg ${type} timed out`)),
+        type === MSG.LOAD ? this.timeouts.loadMs : this.timeouts.operationMs,
+      );
+      this.callbacks.set(id, { worker, resolve, reject, timer });
+      try {
+        worker.postMessage({ id, type, data }, transfer);
+      } catch (error) {
+        this.reset(
+          worker,
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
     });
   }
   private buildWorkerBlob(): string {
@@ -162,17 +254,23 @@ self.onmessage = function(e) {
   self.postMessage({ id: id, type: type, data: data }, trans);
 };
 `;
-    return URL.createObjectURL(new Blob([script], { type: 'text/javascript' }));
+    return URL.createObjectURL(new Blob([script], { type: "text/javascript" }));
   }
   async exec(args: string[]) {
-    const ret = await this.send(MSG.EXEC, { args, timeout: -1 });
+    const ret = await this.send(MSG.EXEC, {
+      args,
+      timeout: this.timeouts.operationMs,
+    });
     if (ret !== 0) throw new Error(`FFmpeg exit code ${ret}`);
     return ret;
   }
   async writeFile(name: string, data: Uint8Array | ArrayBuffer) {
     const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
-    if (!bytes || bytes.byteLength === 0) throw new Error(`writeFile: empty payload for ${name}`);
-    return this.send(MSG.WRITE_FILE, { path: name, data: bytes }, [bytes.buffer]);
+    if (!bytes || bytes.byteLength === 0)
+      throw new Error(`writeFile: empty payload for ${name}`);
+    return this.send(MSG.WRITE_FILE, { path: name, data: bytes }, [
+      bytes.buffer,
+    ]);
   }
   async readFile(name: string) {
     return this.send(MSG.READ_FILE, { path: name });
@@ -194,8 +292,10 @@ self.onmessage = function(e) {
       }
     };
     try {
-      await this.exec(['-i', name]);
-    } catch (e) { /* Metadata check always throws as there is no output */ }
+      await this.exec(["-i", name]);
+    } catch (e) {
+      /* Metadata check always throws as there is no output */
+    }
     this.logCb = oldLog;
     return duration;
   }

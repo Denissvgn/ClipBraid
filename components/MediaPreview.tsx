@@ -2,6 +2,7 @@ import React, { useMemo } from "react";
 import { MediaAsset } from "../types";
 import { MediaItemPreview } from "./MediaItemPreview";
 import { Icon } from "./Icon";
+import { createOpacitySampler } from "../services/timeline";
 interface MediaPreviewProps {
   mediaAssets: MediaAsset[];
   currentTime: number;
@@ -27,25 +28,12 @@ export const MediaPreview: React.FC<MediaPreviewProps> = ({
       ),
     [mediaAssets, currentTime],
   );
-  // Timing policy remains shared with the existing baseline; transition timing remains under qualification.
-  const calculateOpacity = (asset: MediaAsset): number => {
-    const localTime = currentTime - asset.startTime;
-    if (localTime < 0 || localTime >= asset.duration) return 0;
-    let opacity = 1;
-    if (asset.transitionDuration && localTime < asset.transitionDuration)
-      opacity = localTime / asset.transitionDuration;
-    const nextAsset = mediaAssets.find(
-      (a) =>
-        a.startTime > asset.startTime &&
-        a.startTime < asset.startTime + asset.duration,
-    );
-    if (nextAsset && nextAsset.transitionDuration) {
-      const timeUntilNext = nextAsset.startTime - currentTime;
-      if (timeUntilNext < nextAsset.transitionDuration && timeUntilNext > 0)
-        opacity = timeUntilNext / nextAsset.transitionDuration;
-    }
-    return Math.max(0, Math.min(1, opacity));
-  };
+  const sampleOpacity = useMemo(
+    () => createOpacitySampler(mediaAssets),
+    [mediaAssets],
+  );
+  const calculateOpacity = (asset: MediaAsset): number =>
+    sampleOpacity(asset, currentTime);
   const ratio =
     { "16:9": 16 / 9, "9:16": 9 / 16, "1:1": 1 }[aspectRatio] ?? 16 / 9;
   return (
@@ -66,7 +54,12 @@ export const MediaPreview: React.FC<MediaPreviewProps> = ({
       ) : (
         <div
           className="preview-frame"
-          style={{ "--preview-ratio": ratio } as React.CSSProperties}
+          style={
+            {
+              "--preview-ratio": ratio,
+              isolation: "isolate",
+            } as React.CSSProperties
+          }
         >
           {mountedAssets.map((asset) => (
             <MediaItemPreview

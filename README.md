@@ -28,7 +28,7 @@ Fonts and icons are included; the FFmpeg core downloads from an external service
 4. **Save project** keeps an editable JSON draft. **Export video** prepares an MP4.
 
 This is an experimental editor. Picture/sound fidelity and recovery issues remain,
-and long exports can stall. Size targets are estimates; browser/device support
+and long exports can stall. File sizes are bitrate-based estimates; browser/device support
 varies. Keep original files and save drafts regularly; autosave and undo are not
 available yet. Existing JSON project files remain readable.
 
@@ -40,7 +40,7 @@ npm run check
 npm run audit:dependencies
 ```
 
-The bounded suite includes explicit known-failure cases for unresolved behavior.
+The bounded suite checks media regressions, worker failures and production isolation.
 A green result does not establish complete media, device or delivery qualification.
 
 ## License

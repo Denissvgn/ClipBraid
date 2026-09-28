@@ -6,6 +6,14 @@ import React, {
   useMemo,
 } from "react";
 import { Flow } from "./platform";
+import { parseProject } from "./services/project";
+import {
+  projectDuration,
+  createOpacitySampler,
+  exportFrameRate,
+  estimateExport,
+  type ExportQuality,
+} from "./services/timeline";
 import { BrandMark } from "./components/BrandMark";
 import { Icon } from "./components/Icon";
 import { ffmpegService } from "./services/ffmpegService";
@@ -68,62 +76,67 @@ const probeVideoSource = async (
   width: number;
   height: number;
 }> => {
+  const response = await fetch(blobUrl);
+  if (!response.ok) throw new Error("Cannot read the video source.");
+  const input = new Input({
+    source: new BlobSource(await response.blob()),
+    formats: ALL_FORMATS,
+  });
   try {
-    const blob = await (await fetch(blobUrl)).blob();
-    const input = new Input({
-      source: new BlobSource(blob),
-      formats: ALL_FORMATS,
-    });
-    const hasAudio = (await input.getAudioTracks()).length > 0;
-    let fps = 0,
-      width = 0,
-      height = 0;
-    const vTrack = await input.getPrimaryVideoTrack();
-    if (vTrack) {
-      try {
-        fps = (await vTrack.computeFrameRateMetrics({ targetPacketCount: 128 }))
-          .bestGuessFrameRate;
-      } catch {
-        fps = 0;
-      }
-      try {
-        width = await vTrack.getCodedWidth();
-        height = await vTrack.getCodedHeight();
-      } catch {
-        /* keep 0 */
-      }
-    }
-    return { hasAudio, fps, width, height };
-  } catch {
-    return { hasAudio: true, fps: 0, width: 0, height: 0 };
+    const video = await input.getPrimaryVideoTrack();
+    if (!video) throw new Error("The selected file has no video track.");
+    const fps = (
+      await video.computeFrameRateMetrics({ targetPacketCount: 128 })
+    ).bestGuessFrameRate;
+    return {
+      hasAudio: (await input.getAudioTracks()).length > 0,
+      fps,
+      width: await video.getCodedWidth(),
+      height: await video.getCodedHeight(),
+    };
+  } finally {
+    input.dispose();
   }
 };
 const probeDuration = (
   blobUrl: string,
   type: "image" | "video" | "audio",
 ): Promise<number> => {
-  return new Promise((resolve) => {
-    if (type === "image") return resolve(5);
-    const el = document.createElement(type === "video" ? "video" : "audio");
-    el.preload = "metadata";
-    el.onloadedmetadata = () => {
-      const d = el.duration;
-      el.src = "";
-      el.load();
-      resolve(Number.isFinite(d) && d > 0 ? d : 5);
+  return new Promise((resolve, reject) => {
+    const element = document.createElement(type === "image" ? "img" : type);
+    const timer = setTimeout(
+      () => finish(new Error("Media metadata timed out.")),
+      15_000,
+    );
+    const finish = (error?: Error, duration?: number) => {
+      clearTimeout(timer);
+      element.onload = null;
+      element.onerror = null;
+      if (element instanceof HTMLMediaElement) {
+        element.onloadedmetadata = null;
+        element.removeAttribute("src");
+        element.load();
+      } else element.removeAttribute("src");
+      if (error) reject(error);
+      else resolve(duration!);
     };
-    el.onerror = () => resolve(5);
-    el.src = blobUrl;
+    element.onerror = () => finish(new Error("Cannot read this media file."));
+    if (element instanceof HTMLMediaElement) {
+      element.preload = "metadata";
+      element.onloadedmetadata = () => {
+        const duration = element.duration;
+        if (!Number.isFinite(duration) || duration <= 0)
+          finish(new Error("Invalid media duration."));
+        else finish(undefined, duration);
+      };
+    } else element.onload = () => finish(undefined, 5);
+    element.src = blobUrl;
   });
 };
 const createBlobUrl = (base64: string, mimeType: string) => {
-  if (!base64) return "";
-  try {
-    const bytes = base64ToUint8Array(base64);
-    return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
-  } catch (e) {
-    return "";
-  }
+  const bytes = base64ToUint8Array(base64);
+  if (!bytes.length) throw new Error("Empty media data.");
+  return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
 };
 const blobToBase64 = (blob: Blob): Promise<string> => {
   return new Promise((resolve, reject) => {
@@ -172,7 +185,6 @@ const audioBufferToWav = (buffer: AudioBuffer): Uint8Array<ArrayBuffer> => {
   }
   return bytes;
 };
-type ExportQuality = "draft" | "standard" | "high";
 export default function App() {
   const [showIntro, setShowIntro] = useState(true);
   const [mediaAssets, setMediaAssets] = useState<MediaAsset[]>([]);
@@ -263,29 +275,14 @@ export default function App() {
       a.forEach((track) => track.blobUrl && URL.revokeObjectURL(track.blobUrl));
     };
   }, []);
-  const totalDuration = useMemo(() => {
-    const mediaEnd = mediaAssets.reduce(
-      (max, asset) => Math.max(max, asset.startTime + asset.duration),
-      0,
-    );
-    const audioEnd = audioTracks.reduce(
-      (max, track) => Math.max(max, track.startTime + track.duration),
-      0,
-    );
-    return Math.max(mediaEnd, audioEnd, 1);
-  }, [mediaAssets, audioTracks]);
-  const exportEstimate = useMemo(() => {
-    const targetMBMap = { draft: 16, standard: 32, high: 64 } as const;
-    const mb = targetMBMap[exportQuality];
-    const vb = Math.min(
-      4_000_000,
-      Math.max(
-        500_000,
-        Math.floor((mb * 8 * 1024 * 1024 * 0.8) / totalDuration) - 192_000,
-      ),
-    );
-    return { mb, kbps: Math.round(vb / 1000) };
-  }, [exportQuality, totalDuration]);
+  const totalDuration = useMemo(
+    () => projectDuration(mediaAssets, audioTracks),
+    [mediaAssets, audioTracks],
+  );
+  const exportEstimate = useMemo(
+    () => estimateExport(exportQuality, totalDuration),
+    [exportQuality, totalDuration],
+  );
   const seekTo = useCallback(
     (t: number) => {
       const clamped = Math.min(Math.max(0, t), totalDuration);
@@ -328,12 +325,18 @@ export default function App() {
     [transitionDuration, clampTransition],
   );
   const handleImportMedia = async () => {
+    let stagedUrl: string | undefined;
     try {
       const selected = await Flow.media.select({ filter: "all" });
       if (!selected) return;
       setStatus("PROBING MEDIA...");
-      const bUrl = createBlobUrl(selected.base64, selected.mimeType);
-      const dur = await probeDuration(bUrl, selected.type as any);
+      if (selected.type !== "image" && selected.type !== "video")
+        throw new Error("Choose a video or image.");
+      const bUrl = (stagedUrl = createBlobUrl(
+        selected.base64,
+        selected.mimeType,
+      ));
+      const dur = await probeDuration(bUrl, selected.type);
       const {
         hasAudio,
         fps: sourceFps,
@@ -377,20 +380,25 @@ export default function App() {
       });
       sysLog(
         "import",
-        `Clip: ${selected.name} (${selected.type}, ${dur.toFixed(1)}s${sourceFps ? `, ${Math.round(sourceFps)}fps` : ""}${sourceWidth ? `, ${sourceWidth}x${sourceHeight}` : ""})`,
+        `Clip: ${selected.name} (${selected.type}, ${dur.toFixed(1)}s${sourceFps ? `, ${Number(sourceFps.toFixed(3))}fps` : ""}${sourceWidth ? `, ${sourceWidth}x${sourceHeight}` : ""})`,
       );
       setStatus("READY");
     } catch (err) {
+      if (stagedUrl) URL.revokeObjectURL(stagedUrl);
       setStatus("IMPORT ERROR");
       sysLog("error", `Clip import failed: ${String(err).slice(0, 120)}`);
     }
   };
   const handleImportGalleryAudio = async () => {
+    let stagedUrl: string | undefined;
     try {
       const selected = await Flow.media.select({ filter: "audio" });
       if (!selected) return;
       setStatus("LOADING AUDIO...");
-      const bUrl = createBlobUrl(selected.base64, selected.mimeType);
+      const bUrl = (stagedUrl = createBlobUrl(
+        selected.base64,
+        selected.mimeType,
+      ));
       const duration = await probeDuration(bUrl, "audio");
       setAudioTracks((prev) => [
         ...prev,
@@ -411,6 +419,7 @@ export default function App() {
       );
       setStatus("READY");
     } catch (err) {
+      if (stagedUrl) URL.revokeObjectURL(stagedUrl);
       setStatus("AUDIO ERROR");
       sysLog("error", `Audio import failed: ${String(err).slice(0, 120)}`);
     }
@@ -616,6 +625,7 @@ export default function App() {
     setStatus("SAVING PROJECT...");
     try {
       const data = {
+        schemaVersion: 1,
         mediaAssets: mediaAssets.map(({ blobUrl, ...rest }) => rest),
         audioTracks: audioTracks.map(({ blobUrl, ...rest }) => rest),
         aspectRatio,
@@ -641,7 +651,7 @@ export default function App() {
           });
           sysLog(
             "save",
-            `Project saved: ${mediaAssets.length} clips, ${audioTracks.length} audio tracks (${(base64.length / 1048576).toFixed(1)} MB)`,
+            `Project saved: ${mediaAssets.length} clips, ${audioTracks.length} audio tracks (${(base64.length / 1048576).toFixed(1)} MiB)`,
           );
           setStatus("READY");
         } catch (err) {
@@ -657,35 +667,45 @@ export default function App() {
   };
   const loadProjectText = async (text: string): Promise<boolean> => {
     setStatus("LOADING PROJECT...");
+    const stagedUrls: string[] = [];
     try {
-      const data = JSON.parse(text);
-      mediaAssets.forEach((a) => a.blobUrl && URL.revokeObjectURL(a.blobUrl));
-      audioTracks.forEach((a) => a.blobUrl && URL.revokeObjectURL(a.blobUrl));
-      const restoredMedia = (data.mediaAssets || []).map((m: any) => ({
-        ...m,
-        blobUrl: createBlobUrl(m.base64, m.mimeType),
-        hasAudio: m.hasAudio !== false,
-        muted: m.muted ?? false,
-        filter: m.filter || "none",
-        trimStart: m.trimStart || 0,
-        trimEnd: m.trimEnd || 0,
-        originalDuration: m.originalDuration || m.duration,
-        sourceFps: m.sourceFps || undefined,
-        sourceWidth: m.sourceWidth || undefined,
-        sourceHeight: m.sourceHeight || undefined,
-        normalized: m.normalized ?? false,
-      }));
-      const restoredAudio = (data.audioTracks || []).map((a: any) => ({
-        ...a,
-        blobUrl: createBlobUrl(a.base64, a.mimeType),
-      }));
+      const data = parseProject(text);
+      const restore = <T extends { base64: string; mimeType: string }>(
+        asset: T,
+      ) => {
+        const blobUrl = createBlobUrl(asset.base64, asset.mimeType);
+        stagedUrls.push(blobUrl);
+        return { ...asset, blobUrl };
+      };
+      const restoredMedia = data.mediaAssets.map(restore);
+      const restoredAudio = data.audioTracks.map(restore);
+      const restoredTime = Math.max(
+        0,
+        Math.min(
+          data.currentTime,
+          projectDuration(restoredMedia, restoredAudio),
+        ),
+      );
+      const previous = cleanupRef.current;
+      setIsPlaying(false);
+      setSelectedAssetId(null);
       setMediaAssets(restoredMedia);
       setAudioTracks(restoredAudio);
-      if (data.aspectRatio) setAspectRatio(data.aspectRatio);
-      if (data.fitMode) setFitMode(data.fitMode);
-      if (data.transitionDuration !== undefined)
-        setTransitionDuration(data.transitionDuration);
-      if (data.currentTime !== undefined) seekTo(data.currentTime);
+      setAspectRatio(data.aspectRatio);
+      setFitMode(data.fitMode);
+      setTransitionDuration(data.transitionDuration);
+      setCurrentTime(restoredTime);
+      startTimeRef.current = restoredTime;
+      cleanupRef.current = {
+        mediaAssets: restoredMedia,
+        audioTracks: restoredAudio,
+      };
+      previous.mediaAssets.forEach(
+        (asset) => asset.blobUrl && URL.revokeObjectURL(asset.blobUrl),
+      );
+      previous.audioTracks.forEach(
+        (track) => track.blobUrl && URL.revokeObjectURL(track.blobUrl),
+      );
       sysLog(
         "import",
         `Project loaded: ${restoredMedia.length} clips, ${restoredAudio.length} audio tracks`,
@@ -693,6 +713,7 @@ export default function App() {
       setStatus("READY");
       return true;
     } catch (err) {
+      stagedUrls.forEach((url) => URL.revokeObjectURL(url));
       setStatus("LOAD ERROR");
       sysLog("error", `Project load failed: ${String(err).slice(0, 120)}`);
       return false;
@@ -791,6 +812,9 @@ export default function App() {
     exportStartTimeRef.current = performance.now();
 
     try {
+      addLog("EXPORT STARTED");
+      setIsPlaying(false);
+      await ffmpegService.load();
       await initMediaCodecs();
       sysLog(
         "export",
@@ -818,8 +842,11 @@ export default function App() {
       const blobByUrl = new Map<string, Blob>();
       const getBlob = async (url: string | undefined): Promise<Blob> => {
         if (!url) throw new Error("missing media URL");
-        if (!blobByUrl.has(url))
-          blobByUrl.set(url, await (await fetch(url)).blob());
+        if (!blobByUrl.has(url)) {
+          const response = await fetch(url);
+          if (!response.ok) throw new Error("Cannot read export source.");
+          blobByUrl.set(url, await response.blob());
+        }
         return blobByUrl.get(url)!;
       };
       let maxSourceFps = 0;
@@ -833,29 +860,25 @@ export default function App() {
               source: new BlobSource(await getBlob(asset.blobUrl)),
               formats: ALL_FORMATS,
             });
-            const vt = await input.getPrimaryVideoTrack();
-            if (vt)
+            try {
+              const vt = await input.getPrimaryVideoTrack();
+              if (!vt) throw new Error("Missing video track");
               f = (await vt.computeFrameRateMetrics({ targetPacketCount: 128 }))
                 .bestGuessFrameRate;
+            } finally {
+              input.dispose();
+            }
           } catch {
             /* keep 0 */
           }
         }
         maxSourceFps = Math.max(maxSourceFps, f);
       }
-      const fps = Math.max(12, Math.min(30, Math.round(maxSourceFps || 30)));
+      const fps = exportFrameRate(maxSourceFps);
       const frameDuration = 1 / fps;
-      const targetMBMap = { draft: 16, standard: 32, high: 64 };
-
-      const videoBitrate = Math.min(
-        4_000_000,
-        Math.max(
-          500_000,
-          Math.floor(
-            (targetMBMap[exportQuality] * 8 * 1024 * 1024 * 0.8) /
-              totalDuration,
-          ) - 192_000,
-        ),
+      const { videoBitrate, audioBitrate } = estimateExport(
+        exportQuality,
+        totalDuration,
       );
       // Pre-flight: fail fast with a clear message if this device has no AVC encoder
       // (same capability-gap class as the AAC encoder — verify codec availability before export).
@@ -873,93 +896,84 @@ export default function App() {
         `Target: ${targetWidth}x${targetHeight} @ ${fps}fps, ${Math.round(videoBitrate / 1000)} kbps (${exportQuality.toUpperCase()})`,
       );
       addLog(`Splitting workload into 2 parallel threads...`);
-      const mixAudio = async (): Promise<Uint8Array> => {
-        // Defensive: wrap sample length in Math.ceil to prevent engine-dependent truncation errors
+      const mixAudio = async (signal?: AbortSignal): Promise<Uint8Array> => {
         const offlineCtx = new OfflineAudioContext(
           2,
           Math.ceil(Math.max(1, totalDuration * 44100)),
           44100,
         );
-
         for (const asset of mediaAssets) {
-          if (asset.type === "video" && asset.hasAudio && !asset.muted) {
-            try {
-              const blob = await getBlob(asset.blobUrl);
-              const input = new Input({
-                source: new BlobSource(blob),
-                formats: ALL_FORMATS,
-              });
-              const audioTrack = await input.getPrimaryAudioTrack();
-              if (audioTrack) {
-                const sink = new AudioBufferSink(audioTrack);
-                // Drain only the trimmed window; schedule each decoded chunk at
-                // its offset on the master timeline.
-                for await (const wrapped of sink.buffers(
-                  asset.trimStart,
-                  asset.trimStart + asset.duration,
-                )) {
-                  const source = offlineCtx.createBufferSource();
-                  source.buffer = wrapped.buffer;
-                  source.connect(offlineCtx.destination);
-                  source.start(
-                    asset.startTime +
-                      Math.max(0, wrapped.timestamp - asset.trimStart),
-                  );
-                }
-              }
-            } catch (e) {
-              console.warn(`Audio skip: ${asset.name}`);
+          signal?.throwIfAborted();
+          if (asset.type !== "video" || !asset.hasAudio || asset.muted)
+            continue;
+          const input = new Input({
+            source: new BlobSource(await getBlob(asset.blobUrl)),
+            formats: ALL_FORMATS,
+          });
+          try {
+            const track = await input.getPrimaryAudioTrack();
+            // Older drafts may not know that a valid video is silent.
+            if (!track) continue;
+            if (!(await track.canDecode()))
+              throw new Error("Unsupported audio codec");
+            const sink = new AudioBufferSink(track);
+            for await (const wrapped of sink.buffers(
+              asset.trimStart,
+              asset.trimStart + asset.duration,
+            )) {
+              signal?.throwIfAborted();
+              const from = Math.max(wrapped.timestamp, asset.trimStart);
+              const to = Math.min(
+                wrapped.timestamp + wrapped.buffer.duration,
+                asset.trimStart + asset.duration,
+              );
+              if (to <= from) continue;
+              const source = offlineCtx.createBufferSource();
+              source.buffer = wrapped.buffer;
+              source.connect(offlineCtx.destination);
+              source.start(
+                asset.startTime + from - asset.trimStart,
+                from - wrapped.timestamp,
+                to - from,
+              );
             }
+          } catch (error) {
+            throw new Error(
+              `Cannot decode audio for ${asset.name}: ${String(error)}`,
+            );
+          } finally {
+            input.dispose();
           }
         }
         for (const track of audioTracks) {
+          signal?.throwIfAborted();
           try {
-            const blob = await getBlob(track.blobUrl);
-            const arrayBuffer = await blob.arrayBuffer();
-            const buffer = await offlineCtx.decodeAudioData(arrayBuffer);
+            const buffer = await offlineCtx.decodeAudioData(
+              await (await getBlob(track.blobUrl)).arrayBuffer(),
+            );
             const source = offlineCtx.createBufferSource();
             source.buffer = buffer;
             source.connect(offlineCtx.destination);
-            source.start(track.startTime);
-          } catch (e) {
-            console.warn(`Audio skip: ${track.name}`);
+            source.start(
+              track.startTime,
+              0,
+              Math.min(track.duration, buffer.duration),
+            );
+          } catch (error) {
+            throw new Error(
+              `Cannot decode audio for ${track.name}: ${String(error)}`,
+            );
           }
         }
-        const mixedBuffer = await offlineCtx.startRendering();
-        // AAC via WebCodecs is unavailable on Android WebView — hand ffmpeg a
-        // PCM WAV instead; its software AAC encoder is deterministic everywhere.
-        return audioBufferToWav(mixedBuffer);
+        signal?.throwIfAborted();
+        return audioBufferToWav(await offlineCtx.startRendering());
       };
-      // --- T4: precompute neighbor links once (was an O(N) find per frame) ---
-      const nextAssetOf = new Map<string, MediaAsset | undefined>();
-      {
-        const ordered = [...mediaAssets].sort(
-          (a, b) => a.startTime - b.startTime,
-        );
-        ordered.forEach((a, i) => nextAssetOf.set(a.id, ordered[i + 1]));
-      }
-      const opacityAt = (asset: MediaAsset, t: number): number => {
-        const local = t - asset.startTime;
-        let opacity = 1;
-        if (
-          asset.transitionDuration &&
-          local >= 0 &&
-          local < asset.transitionDuration
-        ) {
-          opacity = local / asset.transitionDuration;
-        }
-        const next = nextAssetOf.get(asset.id);
-        if (next && next.transitionDuration) {
-          const until = next.startTime - t;
-          if (until < next.transitionDuration && until > 0)
-            opacity = until / next.transitionDuration;
-        }
-        return Math.max(0, Math.min(1, opacity));
-      };
+      const opacityAt = createOpacitySampler(mediaAssets);
       const renderSegment = async (
         start: number,
         end: number,
         index: number,
+        signal?: AbortSignal,
       ): Promise<Uint8Array> => {
         const segmentDuration = end - start;
         if (segmentDuration <= 0) return new Uint8Array(0);
@@ -967,156 +981,135 @@ export default function App() {
           format: new Mp4OutputFormat({ fastStart: "in-memory" }),
           target: new BufferTarget(),
         });
-        // --- T2: a raw-sample source — plain frames skip the canvas entirely ---
         const videoSource = new VideoSampleSource({
           codec: "avc",
           bitrate: videoBitrate,
           keyFrameInterval: 4,
         });
-        output.addVideoTrack(videoSource);
+        output.addVideoTrack(videoSource, { frameRate: fps });
         const canvas = new OffscreenCanvas(targetWidth, targetHeight);
         const ctx = canvas.getContext("2d", { alpha: false })!;
         const sinks = new Map<string, VideoSampleSink>();
-        const imageBitmaps = new Map<string, ImageBitmap>();
+        const images = new Map<string, ImageBitmap>();
+        const inputs: Input[] = [];
         const relevantAssets = mediaAssets.filter(
           (a) => a.startTime < end && a.startTime + a.duration > start,
         );
-
-        for (const asset of relevantAssets) {
-          if (asset.type !== "video" || !asset.blobUrl) {
-            if (asset.type === "image" && asset.blobUrl) {
-              try {
-                const bitmap = await createImageBitmap(
-                  await getBlob(asset.blobUrl),
-                );
-                imageBitmaps.set(asset.id, bitmap);
-              } catch (e) {
-                addLog(`Thread ${index + 1} Image Cache Error: ${asset.name}`);
-              }
-            }
-            continue;
-          }
-          // Each timeline clip owns its decoder. Sharing sources across clips
-          // must not share mutable decoder state; the long-stall cause remains
-          // unknown and this existing invariant is not proof of a stall repair.
-          try {
-            const input = new Input({
-              source: new BlobSource(await getBlob(asset.blobUrl)),
-              formats: ALL_FORMATS,
-            });
-            const vTrack = await input.getPrimaryVideoTrack();
-            if (vTrack) sinks.set(asset.id, new VideoSampleSink(vTrack));
-          } catch (e) {
-            addLog(`Thread ${index + 1} Sink Error: ${asset.name}`);
-          }
-        }
-        await output.start();
-        const totalFrames = Math.ceil(segmentDuration * fps);
-        // Rendering diagnostics
+        let finalized = false;
         let passed = 0,
           composited = 0;
-        const segStartMs = performance.now();
-
-        for (let i = 0; i < totalFrames; i++) {
-          const t = start + i * frameDuration;
-          const outTs = i * frameDuration;
-          // Half-open [start, end) visibility with a tiny float-safety slack.
-          const visible = relevantAssets.filter(
-            (a) =>
-              t >= a.startTime - 1e-4 && t < a.startTime + a.duration - 1e-4,
-          );
-
-          // --- T2 passthrough: one visible clip, no fade/filter, native size →
-          // the decoded frame goes straight to the encoder (zero canvas work).
-          let handled = false;
-          if (visible.length === 1) {
-            const asset = visible[0];
-            const sink = sinks.get(asset.id);
-            if (
-              asset.type === "video" &&
-              asset.filter === "none" &&
-              sink &&
-              opacityAt(asset, t) === 1
-            ) {
-              const localT = t - asset.startTime + asset.trimStart;
-              // Never ask the decoder past the trimmable media: at the
-              // timeline tail localT can exceed originalDuration - trimEnd
-              // (fade math), and some decoders never resolve that request —
-              // clamp to the last decodable instant instead.
-              const maxT = asset.originalDuration - asset.trimEnd - 1e-3;
-              const src = await sink.getSample(Math.min(localT, maxT));
-              // Re-timing needs identical geometry — the encoder track is fixed
-              // at targetWidth × targetHeight, and passthrough must not alter
-              // rotation/flip/PAR metadata either.
-              const par = src?.pixelAspectRatio;
-              if (
-                src &&
-                src.displayWidth === targetWidth &&
-                src.displayHeight === targetHeight &&
-                src.rotation === 0 &&
-                !src.flip &&
-                par?.num === 1 &&
-                par?.den === 1
-              ) {
-                // Re-time the decoded sample in place (no rewrap) —
-                // the VideoFrame round-trip doubles close()s and can alias a
-                // closed surface. Timestamps are segment-relative — each
-                // segment is its own Output file, so 0-based keeps the muxer
-                // GOP check happy (segments are concatenated afterwards).
-                src.setTimestamp(outTs);
-                src.setDuration(frameDuration);
-                await videoSource.add(src);
-                src.close();
-                handled = true;
-                passed++;
-              } else if (src) {
-                // Size/aspect mismatch → composite this frame through the canvas.
-                src.close();
+        try {
+          for (const asset of relevantAssets) {
+            signal?.throwIfAborted();
+            try {
+              const blob = await getBlob(asset.blobUrl);
+              if (asset.type === "image") {
+                images.set(asset.id, await createImageBitmap(blob));
+              } else {
+                // Each timeline clip owns its decoder, even for repeated sources.
+                const input = new Input({
+                  source: new BlobSource(blob),
+                  formats: ALL_FORMATS,
+                });
+                inputs.push(input);
+                const track = await input.getPrimaryVideoTrack();
+                if (!track || !(await track.canDecode()))
+                  throw new Error("Missing or unsupported video track");
+                sinks.set(asset.id, new VideoSampleSink(track));
               }
+            } catch (error) {
+              throw new Error(`Cannot decode ${asset.name}: ${String(error)}`);
             }
           }
-
-          if (!handled) {
-            // --- T4: a single opaque unfiltered clip needs no clear and no alpha ---
-            const plain =
-              visible.length === 1 &&
-              visible[0].filter === "none" &&
-              opacityAt(visible[0], t) === 1;
-            if (!plain) {
-              ctx.fillStyle = "#000000";
-              ctx.fillRect(0, 0, targetWidth, targetHeight);
-            }
-            for (const asset of visible) {
-              if (!plain) ctx.globalAlpha = opacityAt(asset, t);
-              applyCanvasFilter(ctx, asset.filter);
-              if (asset.type === "image") {
-                const img = imageBitmaps.get(asset.id);
-                if (img) {
-                  const scale =
-                    fitMode === "cover"
-                      ? Math.max(
-                          targetWidth / img.width,
-                          targetHeight / img.height,
-                        )
-                      : Math.min(
-                          targetWidth / img.width,
-                          targetHeight / img.height,
-                        );
-                  ctx.drawImage(
-                    img,
-                    (targetWidth - img.width * scale) / 2,
-                    (targetHeight - img.height * scale) / 2,
-                    img.width * scale,
-                    img.height * scale,
-                  );
+          await output.start();
+          const totalFrames = Math.ceil(segmentDuration * fps);
+          const segmentStarted = performance.now();
+          for (let i = 0; i < totalFrames; i++) {
+            signal?.throwIfAborted();
+            const t = start + i * frameDuration;
+            const outTs = i * frameDuration;
+            const visible = relevantAssets.filter(
+              (a) => t >= a.startTime && t < a.startTime + a.duration,
+            );
+            const decoded = new Map<string, VideoSample>();
+            const frameFor = async (asset: MediaAsset) => {
+              if (decoded.has(asset.id)) return decoded.get(asset.id)!;
+              const sink = sinks.get(asset.id);
+              if (!sink) throw new Error(`Missing decoder for ${asset.name}`);
+              const local = t - asset.startTime + asset.trimStart;
+              const last = asset.originalDuration - asset.trimEnd - 1e-3;
+              const sample = await sink.getSample(
+                Math.max(0, Math.min(local, last)),
+              );
+              if (!sample)
+                throw new Error(
+                  `No decoded frame for ${asset.name} at ${local.toFixed(3)}s`,
+                );
+              decoded.set(asset.id, sample);
+              return sample;
+            };
+            try {
+              let handled = false;
+              if (visible.length === 1) {
+                const asset = visible[0];
+                if (
+                  asset.type === "video" &&
+                  asset.filter === "none" &&
+                  opacityAt(asset, t) === 1
+                ) {
+                  const src = await frameFor(asset);
+                  const par = src.pixelAspectRatio;
+                  if (
+                    src.displayWidth === targetWidth &&
+                    src.displayHeight === targetHeight &&
+                    src.rotation === 0 &&
+                    !src.flip &&
+                    par?.num === 1 &&
+                    par?.den === 1
+                  ) {
+                    src.setTimestamp(outTs);
+                    src.setDuration(frameDuration);
+                    await videoSource.add(src);
+                    handled = true;
+                    passed++;
+                  }
                 }
-              } else {
-                const sink = sinks.get(asset.id);
-                if (sink) {
-                  const localT = t - asset.startTime + asset.trimStart;
-                  const maxT = asset.originalDuration - asset.trimEnd - 1e-3;
-                  const sample = await sink.getSample(Math.min(localT, maxT));
-                  if (sample) {
+              }
+              if (!handled) {
+                // Always reset the entire matte, including contain margins and
+                // frames following a different geometry/filter/transition.
+                ctx.globalAlpha = 1;
+                ctx.filter = "none";
+                ctx.globalCompositeOperation = "source-over";
+                ctx.fillStyle = "#000000";
+                ctx.fillRect(0, 0, targetWidth, targetHeight);
+                ctx.globalCompositeOperation = "lighter";
+                for (const asset of visible) {
+                  ctx.globalAlpha = opacityAt(asset, t);
+                  applyCanvasFilter(ctx, asset.filter);
+                  if (asset.type === "image") {
+                    const image = images.get(asset.id);
+                    if (!image)
+                      throw new Error(`Missing image for ${asset.name}`);
+                    const scale =
+                      fitMode === "cover"
+                        ? Math.max(
+                            targetWidth / image.width,
+                            targetHeight / image.height,
+                          )
+                        : Math.min(
+                            targetWidth / image.width,
+                            targetHeight / image.height,
+                          );
+                    ctx.drawImage(
+                      image,
+                      (targetWidth - image.width * scale) / 2,
+                      (targetHeight - image.height * scale) / 2,
+                      image.width * scale,
+                      image.height * scale,
+                    );
+                  } else {
+                    const sample = await frameFor(asset);
                     const scale =
                       fitMode === "cover"
                         ? Math.max(
@@ -1134,57 +1127,75 @@ export default function App() {
                       sample.displayWidth * scale,
                       sample.displayHeight * scale,
                     );
-                    sample.close();
                   }
                 }
+                ctx.globalAlpha = 1;
+                ctx.filter = "none";
+                ctx.globalCompositeOperation = "source-over";
+                const sample = new VideoSample(canvas, {
+                  timestamp: outTs,
+                  duration: frameDuration,
+                });
+                try {
+                  await videoSource.add(sample);
+                } finally {
+                  sample.close();
+                }
+                composited++;
               }
-              ctx.filter = "none";
+            } finally {
+              decoded.forEach((sample) => sample.close());
             }
-            ctx.globalAlpha = 1.0;
-            const sample = new VideoSample(canvas, {
-              timestamp: outTs,
-              duration: frameDuration,
-            });
-            await videoSource.add(sample);
-            sample.close();
-            composited++;
+            if (i % 200 === 199 || i === totalFrames - 1) {
+              const seconds = (performance.now() - segmentStarted) / 1000;
+              addLog(
+                `Thread ${index + 1}: ${i + 1}/${totalFrames} fr | ${passed} passthrough | ${((i + 1) / seconds).toFixed(1)} fps`,
+              );
+            }
+            if (i % 15 === 0) {
+              segmentProgress.current[index] = i / totalFrames;
+              setExportProgress(
+                ((segmentProgress.current[0] + segmentProgress.current[1]) /
+                  2) *
+                  70,
+              );
+              await new Promise((resolve) => setTimeout(resolve, 0));
+            }
           }
-
-          if (i % 200 === 199 || i === totalFrames - 1) {
-            const el = (performance.now() - segStartMs) / 1000;
-            addLog(
-              `Thread ${index + 1}: ${i + 1}/${totalFrames} fr | ${passed} passthrough | ${((i + 1) / el).toFixed(1)} fps`,
-            );
-          }
-          if (i % 15 === 0) {
-            segmentProgress.current[index] = i / totalFrames;
-            const totalP =
-              (segmentProgress.current[0] + segmentProgress.current[1]) / 2;
-            setExportProgress(totalP * 70);
-            // The frame loop never yields to the event loop, so React cannot
-            // paint progress between awaits that resolve in microtasks. Yield
-            // one macrotask per progress tick so the % ring actually moves.
-            await new Promise((r) => setTimeout(r, 0));
-          }
+          videoSource.close();
+          await output.finalize();
+          finalized = true;
+          segmentProgress.current[index] = 1;
+          addLog(
+            `Thread ${index + 1} done: ${passed} passthrough / ${composited} composited frames`,
+          );
+          return new Uint8Array(output.target.buffer!);
+        } finally {
+          if (!finalized) await output.cancel().catch(() => {});
+          images.forEach((image) => image.close());
+          inputs.forEach((input) => input.dispose());
         }
-        addLog(`Thread ${index + 1}: finalizing…`);
-        videoSource.close();
-        await output.finalize();
-
-        imageBitmaps.forEach((bitmap) => bitmap.close());
-        segmentProgress.current[index] = 1.0;
-        addLog(
-          `Thread ${index + 1} done: ${passed} passthrough / ${composited} composited frames`,
-        );
-        return new Uint8Array(output.target.buffer!);
       };
-      // Ensure the split point is frame-aligned to avoid seams
       const mid = Math.round((totalDuration / 2) * fps) / fps;
-      const [chunk1, chunk2, audioData] = await Promise.all([
-        renderSegment(0, mid, 0),
-        renderSegment(mid, totalDuration, 1),
-        mixAudio(),
+      const cancellation = new AbortController();
+      const run = async (work: () => Promise<Uint8Array>) => {
+        try {
+          return await work();
+        } catch (error) {
+          cancellation.abort(error);
+          throw error;
+        }
+      };
+      // A failed branch cancels its siblings; settle their cleanup before a retry.
+      const results = await Promise.allSettled([
+        run(() => renderSegment(0, mid, 0, cancellation.signal)),
+        run(() => renderSegment(mid, totalDuration, 1, cancellation.signal)),
+        run(() => mixAudio(cancellation.signal)),
       ]);
+      const [chunk1, chunk2, audioData] = results.map((result) => {
+        if (result.status === "rejected") throw result.reason;
+        return result.value;
+      });
       setExportProgress(70);
       addLog("PASS 2/4: Concatenating Visual Stream...");
 
@@ -1229,7 +1240,7 @@ export default function App() {
         "-c:a",
         "aac",
         "-b:a",
-        "192k",
+        String(audioBitrate),
         "-movflags",
         "+faststart",
         "-y",
@@ -1246,36 +1257,41 @@ export default function App() {
       );
 
       setExportProgress(95);
-      addLog(`Final payload: ${(b64.length / 1048576).toFixed(1)} MB (base64)`);
+      addLog(
+        `Final payload: ${(b64.length / 1048576).toFixed(1)} MiB (base64)`,
+      );
       try {
-        await Flow.save({
+        const saved = await Flow.save({
           base64: b64,
           mimeType: "video/mp4",
           name: "clipbraid_video.mp4",
         });
+        if (saved === false)
+          throw new Error("Save adapter rejected the video.");
+        addLog("EXPORT COMPLETE: save adapter accepted the video");
         sysLog(
           "save",
-          `Video handed to save adapter: clipbraid_video.mp4 (${(b64.length / 1048576).toFixed(1)} MB base64)`,
+          `Video handed to save adapter: clipbraid_video.mp4 (${(b64.length / 1048576).toFixed(1)} MiB base64)`,
         );
       } catch (e) {
         throw new Error(
-          `Save rejected — platform limit reached (~${(b64.length / 1048576).toFixed(0)} MB base64). Try 'Draft' quality or a shorter project. (${String(e)})`,
+          `Save rejected (${(masterBytes.byteLength / 1048576).toFixed(1)} MiB video): ${String(e)}`,
         );
       }
 
       setExportProgress(100);
       sysLog(
         "export",
-        `Export complete: ${exportQuality}, ${(b64.length / 1048576).toFixed(1)} MB`,
+        `Export complete: ${exportQuality}, ${(b64.length / 1048576).toFixed(1)} MiB`,
       );
       setStatus("READY");
     } catch (err) {
+      addLog(`EXPORT FAILED: ${String(err)}`);
       setStatus("EXPORT ERROR");
       sysLog("error", `Export failed: ${String(err).slice(0, 200)}`);
       setExportFailed(true);
       setErrorDetail(String(err));
     } finally {
-      setIsExporting(false);
       // Temp files must be removed even after a failure, or a retry hits
       // "file exists" errors inside the wasm filesystem.
       for (const f of [
@@ -1289,9 +1305,10 @@ export default function App() {
         try {
           await ffmpegService.deleteFile(f);
         } catch {
-          /* already gone */
+          /* already gone or worker reset */
         }
       }
+      setIsExporting(false);
     }
   };
   const videos = mediaAssets.filter((asset) => asset.type === "video");
@@ -1822,7 +1839,8 @@ export default function App() {
                     )}
                   </div>
                   <p className="helper-text">
-                    {exportEstimate.mb} MB target · size is an estimate
+                    ~{exportEstimate.estimatedMiB.toFixed(1)} MiB estimated ·
+                    actual size varies
                   </p>
                 </section>
                 <details className="recorder">
