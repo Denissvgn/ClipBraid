@@ -1,0 +1,45 @@
+node_modules/
+dist/
+build/
+public/*.json
+*.log
+.DS_Store
+
+# Local qualification evidence and generated browser artifacts
+/reports/
+/test-results/
+/playwright-report/
+
+# Local design checks
+/.hallmark/
+
+# Private history, planning and local reference inputs
+/IMPLEMENTATION_BACKLOG.md
+/REVIEW.md
+/HANDOFF.md
+/JOURNAL.md
+/test-data/
+/scripts/reproduce-old-normalization.mjs
+
+# Internal documentation and agent/project planning are local-only.
+*.[mM][dD]
+*.mdx
+!/README.md
+!/THIRD_PARTY_NOTICES.md
+/docs/
+/notes/
+/plans/
+/planning/
+/naming/
+/branding/
+/indexes/
+/indexing/
+/context/
+/.llm-wiki*/
+/llm-wiki/
+/wiki/
+/.agents/
+/.codex/
+/documentation-index*
+/docs-index*
+/context-index*

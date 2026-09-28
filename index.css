@@ -1,0 +1,36 @@
+@import "tailwindcss" source(none);
+@source "./App.tsx";
+@source "./components";
+@import "tw-animate-css";
+@import "./tokens.css";
+@import "./clipbraid.css";
+
+/* Framework base; ClipBraid tokens below supply the active theme. */
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: #0d0d0f;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  overscroll-behavior: none;
+}
+
+/* The app assumes a full-height flex column; lock body scrolling to it. */
+body {
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ClipBraid base overrides; framework directives and existing entry remain intact. */
+:root { color-scheme: light; }
+html, body { overflow-x: clip; }
+html, body, #root { background: var(--color-paper); font-family: var(--font-body); }
+body { overflow-y: auto; }
+/* One document scroller on narrow screens; dialogs keep native centering. */
+body, #root { height: auto; min-height: 100%; }
+body { overflow-y: visible; }
