@@ -1,0 +1,54 @@
+{
+  "bars-fractional-av.mp4": {
+    "bytes": 16747,
+    "sha256": "b7df8485f1ffb4d5abf645f349f0769240f47c0a968101d63f279e0e924e5acc"
+  },
+  "corrupt.mp4": {
+    "bytes": 12,
+    "sha256": "6f95a1a9b36376c7a98b9d42ddb9edac526692a215611c92a6b78cf6d584945b"
+  },
+  "drafts/duplicate-ids.json": {
+    "bytes": 50,
+    "sha256": "4b82752d5a32c6ec09c3501e54c58760aa981fe3bd4eacaba1add31beb0c2d81"
+  },
+  "drafts/future-version.json": {
+    "bytes": 62,
+    "sha256": "54a2319f008727a6256231ea6a52fb7a2a0d2159711647d7300cbb59b58e1b32"
+  },
+  "drafts/invalid-arrays.json": {
+    "bytes": 20,
+    "sha256": "431eb49adf6f9ec2abde4a8a3d40ff5fab8a0c81fe1138ad06d73d5d9484bbd7"
+  },
+  "drafts/invalid-json.json": {
+    "bytes": 8,
+    "sha256": "40b5cafe045b9c9e31a1c3fdcfbc89f934906ff06a6276b55c2a0e517be21655"
+  },
+  "drafts/invalid-timings.json": {
+    "bytes": 70,
+    "sha256": "67e75472ef01b307629d56c9fe73feed426973a87c4006165cf471cce3e2b3c7"
+  },
+  "landscape-red.png": {
+    "bytes": 342,
+    "sha256": "a95c855577fd0290671a345b6d0b503630f51e113ff14ac1028e3f4af4fc9cd3"
+  },
+  "oversized-av.mp4": {
+    "bytes": 13416,
+    "sha256": "4a96b97e396d16824b7a7b5d6a1ad75515d35e04a975db5140cc83f94afc1d17"
+  },
+  "portrait-blue.png": {
+    "bytes": 484,
+    "sha256": "38b6ead96ded6ec99707b668e498f64b2aa5940cdd8015d7f4a8850baa3b81c1"
+  },
+  "rotated-av.mp4": {
+    "bytes": 16747,
+    "sha256": "0b9ba872197605e264041b6ec3000664df8d868fd858583e7b5da7c2a5d490d5"
+  },
+  "tone-impulses.wav": {
+    "bytes": 96044,
+    "sha256": "0b3f072e83b87cef6d3be2b4545b5736bc15ce2fa14786a0330f7430b4f9e265"
+  },
+  "unsupported.bin": {
+    "bytes": 39,
+    "sha256": "1e52dc4c49df4248f9a1e9ecfc11fe3b7e6e545db4a49c4f998f3dbf83389824"
+  }
+}
