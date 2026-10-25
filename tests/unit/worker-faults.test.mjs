@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
-function faultService(control = {}, timeouts = {}) {
+function faultService(control = {}, timeouts = {}, options = {}) {
   const workers = [],
     revoked = [],
     urls = [];
@@ -46,11 +46,23 @@ function faultService(control = {}, timeouts = {}) {
       revoked.push(url);
     }
   }
-  const fetch = async () => ({
-    ok: !control.failFetch,
-    status: control.failFetch ? 503 : 200,
-    arrayBuffer: async () => new ArrayBuffer(1),
-  });
+  const requests = [];
+  const fetch = async (url, { signal }) => {
+    requests.push(url);
+    const blocked = () => new Promise((_, reject) => {
+      signal.throwIfAborted();
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+    if (control.hangFetch) await blocked();
+    return {
+      ok: !control.failFetch,
+      status: control.failFetch ? 503 : 200,
+      arrayBuffer: async () => {
+        if (control.hangBody) await blocked();
+        return Uint8Array.from(control.badWasm ? [60, 104, 116, 109] : [0, 97, 115, 109]).buffer;
+      },
+    };
+  };
   const source = ts.transpile(
     readFileSync("services/ffmpegService.ts", "utf8"),
     { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
@@ -67,10 +79,11 @@ function faultService(control = {}, timeouts = {}) {
       loadMs: 100,
       operationMs: 100,
       ...timeouts,
-    }),
+    }, options),
     workers,
     revoked,
     urls,
+    requests,
   };
 }
 test("concurrent loads share one promise and one worker", async () => {
@@ -151,4 +164,44 @@ test("unresponsive loading and operations time out and release resources", async
   assert.equal(running.workers[0].terminated, true);
   await running.service.load();
   assert.equal(running.workers.length, 2);
+});
+for (const mode of ["hangFetch", "hangBody"])
+  test(`${mode} aborts on deadline and allows explicit retry`, async () => {
+    const control = { [mode]: true };
+    const { service, workers } = faultService(control, { fetchMs: 10 });
+    // Keep a timer alive because AbortSignal.timeout uses an unref'ed timer in Node.
+    const keepAlive = setTimeout(() => {}, 1000);
+    try {
+      await assert.rejects(service.load(), /timed out|aborted/i);
+      assert.equal(workers.length, 0);
+      control[mode] = false;
+      await service.load();
+      service.terminate();
+    } finally { clearTimeout(keepAlive); }
+  });
+test("termination during initialization cannot revive an old worker or clear a newer load", async () => {
+  const control = { hangLoad: true };
+  const { service, workers, urls, revoked } = faultService(control);
+  const first = service.load();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const rejected = assert.rejects(first, /stopped/);
+  service.terminate();
+  control.hangLoad = false;
+  const second = service.load();
+  assert.equal(service.load(), second);
+  await Promise.all([rejected, second]);
+  assert.equal(workers.length, 2);
+  assert.equal(workers[0].terminated, true);
+  assert.equal(workers[1].terminated, false);
+  const work = service.readFile("pending");
+  const settled = assert.rejects(work, /stopped/);
+  service.terminate();
+  await settled;
+  assert.equal(revoked.length, urls.length);
+});
+test("invalid WASM is rejected and a configured core never falls back to a CDN", async () => {
+  const { service, requests, workers } = faultService({ badWasm: true }, {}, { coreBaseURLs: ["https://local.example/core"] });
+  await assert.rejects(service.load(), /Invalid WASM/);
+  assert.equal(workers.length, 0);
+  assert.ok(requests.every(url => url.startsWith("https://local.example/core/")));
 });

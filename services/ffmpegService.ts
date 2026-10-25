@@ -19,6 +19,8 @@ export class FFmpegService {
   private worker: Worker | null = null;
   private loaded = false;
   private loading: Promise<void> | null = null;
+  private loadController: AbortController | null = null;
+  private readonly assetBases: string[];
   private msgId = 0;
   private urls = new Map<Worker, string[]>();
   private callbacks = new Map<
@@ -33,23 +35,51 @@ export class FFmpegService {
   private logCb: ((msg: string) => void) | null = null;
   private progressCb: ((p: { progress: number }) => void) | null = null;
   private timeouts: Timeouts;
-  constructor(timeouts: Partial<Timeouts> = {}) {
+  constructor(timeouts: Partial<Timeouts> = {}, options: { coreBaseURLs?: string[] } = {}) {
     this.timeouts = {
       fetchMs: 30_000,
       loadMs: 45_000,
       operationMs: 300_000,
       ...timeouts,
     };
+    this.assetBases = (options.coreBaseURLs ?? CDNS).map(base => {
+      const url = new URL(base, globalThis.location?.href);
+      if (url.protocol !== "https:" && url.protocol !== "http:")
+        throw new Error("FFmpeg core URLs must use HTTP or HTTPS.");
+      return url.href.replace(/\/+$/, "");
+    });
+    if (!this.assetBases.length) throw new Error("No FFmpeg core location configured.");
   }
   load(onLog?: (msg: string) => void): Promise<void> {
     if (onLog) this.logCb = onLog;
     if (this.loaded && this.worker) return Promise.resolve();
     if (!this.loading) {
-      this.loading = this.loadWorker().finally(() => {
-        this.loading = null;
+      const controller = new AbortController();
+      this.loadController = controller;
+      const stopWorker = () => {
+        if (this.loadController === controller && this.worker)
+          this.reset(this.worker, controller.signal.reason);
+      };
+      controller.signal.addEventListener("abort", stopWorker, { once: true });
+      const timer = setTimeout(() => controller.abort(new Error("FFmpeg initialization timed out; retry media tools.")), 90_000);
+      const pending = this.loadWorker(controller.signal).finally(() => {
+        clearTimeout(timer);
+        controller.signal.removeEventListener("abort", stopWorker);
+        if (this.loading === pending) {
+          this.loading = null;
+          this.loadController = null;
+        }
       });
+      this.loading = pending;
     }
     return this.loading;
+  }
+  /** Abort fetch/init and settle all operations before an explicit retry. */
+  terminate(reason = new Error("FFmpeg stopped; retry media tools.")): void {
+    this.loadController?.abort(reason);
+    this.loadController = null;
+    this.loading = null;
+    if (this.worker) this.reset(this.worker, reason);
   }
   private reset(worker: Worker, error: Error) {
     if (this.worker !== worker && !this.urls.has(worker)) return;
@@ -70,21 +100,28 @@ export class FFmpegService {
     this.urls.get(worker)?.forEach((url) => URL.revokeObjectURL(url));
     this.urls.delete(worker);
   }
-  private async loadWorker(): Promise<void> {
+  private async loadWorker(signal: AbortSignal): Promise<void> {
     let error: unknown;
-    for (const baseURL of CDNS) {
+    for (const baseURL of this.assetBases) {
       const urls: string[] = [];
       let worker: Worker | undefined;
       try {
+        signal.throwIfAborted();
         this.logCb?.(`Connecting to ${new URL(baseURL).hostname}...`);
         const fetchAsset = async (name: string, type: string) => {
           const response = await fetch(`${baseURL}/${name}`, {
-            signal: AbortSignal.timeout(this.timeouts.fetchMs),
+            signal: AbortSignal.any([signal, AbortSignal.timeout(this.timeouts.fetchMs)]),
           });
           if (!response.ok)
             throw new Error(`FFmpeg asset HTTP ${response.status}: ${name}`);
           const bytes = await response.arrayBuffer();
+          signal.throwIfAborted();
           if (!bytes.byteLength) throw new Error(`Empty FFmpeg asset: ${name}`);
+          if (name.endsWith(".wasm")) {
+            const magic = new Uint8Array(bytes, 0, Math.min(4, bytes.byteLength));
+            if (magic.length !== 4 || magic[0] !== 0 || magic[1] !== 97 || magic[2] !== 115 || magic[3] !== 109)
+              throw new Error(`Invalid WASM response: ${name}`);
+          }
           const url = URL.createObjectURL(new Blob([bytes], { type }));
           urls.push(url);
           return url;
@@ -130,6 +167,7 @@ export class FFmpegService {
             new Error("FFmpeg worker message could not be decoded"),
           );
         await this.send(MSG.LOAD, { coreURL, wasmURL }, [], attempt);
+        signal.throwIfAborted();
         if (this.worker !== attempt)
           throw new Error("FFmpeg worker stopped during initialization");
         this.loaded = true;
@@ -143,6 +181,7 @@ export class FFmpegService {
             cause instanceof Error ? cause : new Error(String(cause)),
           );
         else urls.forEach((url) => URL.revokeObjectURL(url));
+        if (signal.aborted) throw signal.reason;
       }
     }
     throw new Error(
@@ -303,4 +342,5 @@ self.onmessage = function(e) {
     this.progressCb = cb;
   }
 }
-export const ffmpegService = new FFmpegService();
+const configuredBase = (globalThis as { CLIPBRAID_FFMPEG_CORE_BASE_URL?: string }).CLIPBRAID_FFMPEG_CORE_BASE_URL;
+export const ffmpegService = new FFmpegService({}, configuredBase ? { coreBaseURLs: [configuredBase] } : {});

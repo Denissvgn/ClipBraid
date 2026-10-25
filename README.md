@@ -17,6 +17,11 @@ npm run preview
 
 Export requires HTTPS or localhost and a browser with WebCodecs AVC support.
 Fonts and icons are included; the FFmpeg core downloads from an external service.
+To host that core yourself, serve the UMD `ffmpeg-core.js` and `ffmpeg-core.wasm`
+from pinned `@ffmpeg/core@0.12.6` and set
+`window.CLIPBRAID_FFMPEG_CORE_BASE_URL = "/your-core-directory"` before loading
+the app module. This option uses only that directory; media-tool failures can
+be retried in the editor.
 
 ## Make a video
 

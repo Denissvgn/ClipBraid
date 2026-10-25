@@ -203,6 +203,8 @@ button[aria-busy="true"] {
 .source-notice {
   margin: 0;
   display: flex;
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
   gap: var(--space-sm);
   padding: var(--space-sm) var(--space-xl);
   align-items: center;

@@ -213,21 +213,30 @@ export default function App() {
     cleanupRef.current = { mediaAssets, audioTracks };
   }, [mediaAssets, audioTracks]);
   const saveInFlightRef = useRef(false);
+  const bootAttemptRef = useRef(0);
   // System journal: every user-visible state change lands here as a live
   // event (viewer tab 1). Export-phase chatter stays in exportLogs only —
   // the journal records lifecycle, not per-frame progress.
   const sysLog = useCallback((kind: SystemEventKind, msg: string) => {
     logEvent(kind, msg);
   }, []);
-  useEffect(() => {
-    ffmpegService.load(message => {
-      if (!exportJobs.getSnapshot().active) setStatus(message.slice(0, 30).toUpperCase());
+  const loadMediaTools = useCallback(() => {
+    const attempt = ++bootAttemptRef.current;
+    setStatus("LOADING MEDIA TOOLS...");
+    return ffmpegService.load(message => {
+      if (attempt === bootAttemptRef.current && !exportJobs.getSnapshot().active)
+        setStatus(message.slice(0, 30).toUpperCase());
     }).then(() => {
-      if (!exportJobs.getSnapshot().active) setStatus("READY");
+      if (attempt === bootAttemptRef.current && !exportJobs.getSnapshot().active) setStatus("READY");
     }).catch(error => {
+      if (attempt !== bootAttemptRef.current) return;
       setStatus("FATAL ERROR"); setErrorDetail(`FFmpeg failed to load: ${error.message}`);
     });
   }, [exportJobs]);
+  useEffect(() => {
+    void loadMediaTools();
+    return () => { bootAttemptRef.current++; };
+  }, [loadMediaTools]);
   // The pin-sync effect owns source release: commits pre-pin additions so URLs
   // exist at first render, and unreferenced sources are released only after
   // the state that drops them has committed — never while a job lease is open.
@@ -890,6 +899,12 @@ export default function App() {
           </button>
         </div>
       </header>
+      {status === "FATAL ERROR" && (
+        <div className="source-notice" role="alert">
+          <span>{errorDetail}</span>
+          <button className="button secondary" onClick={() => void loadMediaTools()}>Retry media tools</button>
+        </div>
+      )}
       {mediaAssets.some(
         (asset) =>
           (asset.sourceWidth ?? 0) > 1280 || (asset.sourceHeight ?? 0) > 1280,
