@@ -58,7 +58,9 @@ export interface DerivedMedia {
   key: string;
   mimeType: string;
   bytes: Blob;
+  metadata?: { width: number; height: number; duration: number; fps: number; rotation: number; hasAudio: boolean };
 }
+interface DerivedEntry { media: DerivedMedia; url: string | null; refs: number }
 
 export interface UrlApi {
   createObjectURL(blob: Blob): string;
@@ -70,7 +72,7 @@ interface Entry {
   url: string | null;
   refs: number;
   disposed: boolean;
-  derived: Map<string, DerivedMedia>;
+  derived: Map<string, DerivedEntry>;
 }
 
 const defaultUrlApi: UrlApi = {
@@ -110,14 +112,14 @@ export class MediaSourceStore {
           continue;
         }
         const sourceId = `src-${++this.counter}`;
-        const asset: SourceAsset = {
+        const asset: SourceAsset = Object.freeze({
           sourceId,
           revision: 1,
           mimeType: item.mimeType,
           byteLength: item.bytes.size,
           sha256,
           bytes: item.bytes,
-        };
+        });
         this.entries.set(sourceId, {
           asset,
           url: null,
@@ -256,8 +258,8 @@ export class MediaSourceStore {
     // The live project is a *set* of pins: re-pinning adds no reference, so a
     // later syncPins/remove releases exactly one.
     if (this.pinned.has(sourceId)) return;
-    this.pinned.add(sourceId);
     this.retain(entry);
+    this.pinned.add(sourceId);
   }
 
   /**
@@ -310,18 +312,42 @@ export class MediaSourceStore {
     const entry = this.entries.get(sourceId);
     if (!entry || entry.disposed)
       throw new Error(`Unknown media source: ${sourceId}`);
-    entry.derived.set(derived.key, derived);
+    this.dropDerived(sourceId, derived.key);
+    entry.derived.set(derived.key, { media: Object.freeze({ ...derived }), url: null, refs: 0 });
   }
 
   derivedFor(sourceId: string, key: string): DerivedMedia | undefined {
-    return this.entries.get(sourceId)?.derived.get(key);
+    return this.entries.get(sourceId)?.derived.get(key)?.media;
+  }
+
+  acquireDerived(sourceId: string, key: string): SourceLease {
+    const entry = this.entries.get(sourceId);
+    const derived = entry?.derived.get(key);
+    if (!entry || entry.disposed || !derived) throw new Error("Unknown derived media.");
+    this.retain(entry);
+    try {
+      if (!derived.url) derived.url = this.urlApi.createObjectURL(derived.media.bytes);
+      derived.refs++;
+    } catch (error) { this.release(entry, "failed-derived-url"); throw error; }
+    let released = false;
+    return { sourceId, url: derived.url, release: () => {
+      if (released) return;
+      released = true; derived.refs--;
+      if (!derived.refs && derived.url) {
+        this.urlApi.revokeObjectURL(derived.url); derived.url = null;
+      }
+      this.release(entry, "derived");
+    } };
   }
 
   dropDerived(sourceId: string, key?: string): void {
     const entry = this.entries.get(sourceId);
     if (!entry) return;
-    if (key === undefined) entry.derived.clear();
-    else entry.derived.delete(key);
+    for (const [id, derived] of entry.derived) {
+      if (key !== undefined && key !== id) continue;
+      entry.derived.delete(id);
+      if (!derived.refs && derived.url) this.urlApi.revokeObjectURL(derived.url);
+    }
   }
 
   /** Deterministic observability for tests and diagnostics. */
@@ -343,9 +369,9 @@ export class MediaSourceStore {
   }
 
   private retain(entry: Entry): void {
-    entry.refs += 1;
     if (entry.url === null)
       entry.url = this.urlApi.createObjectURL(entry.asset.bytes);
+    entry.refs += 1;
   }
 
   private release(entry: Entry, _purpose: string): void {
@@ -363,6 +389,8 @@ export class MediaSourceStore {
       this.urlApi.revokeObjectURL(entry.url);
       entry.url = null;
     }
+    for (const derived of entry.derived.values())
+      if (derived.url) this.urlApi.revokeObjectURL(derived.url);
     entry.derived.clear();
     this.entries.delete(entry.asset.sourceId);
     this.pinned.delete(entry.asset.sourceId);

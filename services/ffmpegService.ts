@@ -343,4 +343,5 @@ self.onmessage = function(e) {
   }
 }
 const configuredBase = (globalThis as { CLIPBRAID_FFMPEG_CORE_BASE_URL?: string }).CLIPBRAID_FFMPEG_CORE_BASE_URL;
-export const ffmpegService = new FFmpegService({}, configuredBase ? { coreBaseURLs: [configuredBase] } : {});
+export const createFFmpegService = () => new FFmpegService({}, configuredBase ? { coreBaseURLs: [configuredBase] } : {});
+export const ffmpegService = createFFmpegService();

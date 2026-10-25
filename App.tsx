@@ -15,6 +15,8 @@ import {
 import { MediaSourceStore, type SourceLease } from "./services/mediaSources";
 import { ExportJobs } from "./services/exportJob";
 import { runExportPipeline } from "./services/exportPipeline";
+import { ProxyQueue } from "./services/proxyQueue";
+import { renderProxy } from "./services/proxyRenderer";
 import {
   activeIntervals,
   clampPlayhead,
@@ -192,6 +194,10 @@ export default function App() {
   const exportJobsRef = useRef<ExportJobs | null>(null);
   if (!exportJobsRef.current) exportJobsRef.current = new ExportJobs(storeRef.current, runExportPipeline);
   const exportJobs = exportJobsRef.current;
+  const proxyQueueRef = useRef<ProxyQueue | null>(null);
+  if (!proxyQueueRef.current) proxyQueueRef.current = new ProxyQueue(storeRef.current, renderProxy);
+  const proxyQueue = proxyQueueRef.current;
+  const proxyState = useSyncExternalStore(proxyQueue.subscribe, proxyQueue.getSnapshot);
   const exportState = useSyncExternalStore(exportJobs.subscribe, exportJobs.getSnapshot);
   const isExporting = exportState.active;
   const exportFailed = exportState.phase === "failed";
@@ -209,6 +215,11 @@ export default function App() {
     (sourceId: string) => storeRef.current!.urlFor(sourceId),
     [],
   );
+  const previewUrl = useCallback(
+    (id: string) => proxyQueue.urlFor(id) || storeRef.current!.urlFor(id),
+    [proxyQueue, proxyState],
+  );
+  useEffect(() => { proxyQueue.sync(mediaAssets, isExporting); }, [proxyQueue, mediaAssets, isExporting]);
 
   useEffect(() => {
     cleanupRef.current = { mediaAssets, audioTracks };
@@ -249,6 +260,7 @@ export default function App() {
   useEffect(() => {
     return () => {
       exportJobs.dispose();
+      proxyQueue.dispose();
       storeRef.current!.clear();
     };
   }, []);
@@ -743,6 +755,36 @@ export default function App() {
       e.target.value = "";
     }
   };
+  const handleRelinkOriginal = async () => {
+    if (!selectedAssetId || isExporting) return;
+    const target = cleanupRef.current.mediaAssets.find(asset => asset.id === selectedAssetId);
+    if (!target || target.type !== "video") return;
+    const tx = storeRef.current!.beginTransaction();
+    try {
+      const selected = await Flow.media.select({ filter: "video" });
+      if (!selected) { tx.rollback(); return; }
+      if (!selected.mimeType.startsWith("video/")) throw new Error("Choose an original video file.");
+      const [source] = await tx.stage([{ bytes: base64ToBlob(selected.base64, selected.mimeType), mimeType: selected.mimeType }]);
+      const lease = tx.acquire(source.sourceId);
+      const duration = await probeDuration(lease.url, "video");
+      const metadata = await probeVideoSource(source.bytes);
+      const current = cleanupRef.current.mediaAssets;
+      if (!current.some(asset => asset.sourceId === target.sourceId)) throw new Error("This source is no longer in the project.");
+      const updated = current.map(asset => {
+        if (asset.sourceId !== target.sourceId) return asset;
+        if (asset.trimStart + asset.duration > duration + 0.001) throw new Error("The chosen file is shorter than a selected source interval; choose the full original.");
+        return { ...asset, sourceId: source.sourceId, mimeType: selected.mimeType,
+          originalDuration: duration, trimEnd: Math.max(0, duration - asset.trimStart - asset.duration),
+          hasAudio: metadata.hasAudio, sourceFps: metadata.fps, sourceWidth: metadata.width,
+          sourceHeight: metadata.height, normalized: false };
+      });
+      tx.pin(source.sourceId); setMediaAssets(updated); tx.commit();
+      setStatus("READY"); sysLog("import", "Original video relinked; clip selections were preserved.");
+    } catch (error) {
+      tx.rollback(); setStatus("RELINK ERROR");
+      sysLog("error", `Could not relink original: ${String(error)}`);
+    }
+  };
   // Test/measurement hook (test-mode dev server + ?e2e=1 only): loads a
   // draft from a URL and run the export — the local measurement harness.
   const loadProjectTextRef = useRef(loadProjectText);
@@ -758,8 +800,13 @@ export default function App() {
         const text = await (await fetch(url)).text();
         return loadProjectTextRef.current(text);
       },
-      // Legacy measurement API: normalization is deliberately disabled.
-      normalizeAll: async () => 0,
+      normalizeAll: async () => {
+        proxyQueue.request(cleanupRef.current.mediaAssets);
+        await proxyQueue.idle();
+        return proxyQueue.getSnapshot().filter(job => job.status === "ready").length;
+      },
+      proxyState: proxyQueue.getSnapshot,
+      mediaInventory: () => storeRef.current!.snapshot(),
       exportState: exportJobs.getSnapshot,
       exportDeadlines: exportJobs.setDeadlines,
     };
@@ -916,7 +963,7 @@ export default function App() {
         <p role="note" className="source-notice">
           <Icon name="info" size={16} />
           Original media retained. Large clips may take more memory and time;
-          optimized proxies are temporarily disabled.
+          optimized previews never change project or export sources.
         </p>
       )}
       <main className="editor-workspace">
@@ -946,7 +993,7 @@ export default function App() {
           <div className="preview-stage">
             <MediaPreview
               mediaAssets={mediaAssets}
-              sourceUrl={sourceUrl}
+              sourceUrl={previewUrl}
               currentTime={currentTime}
               isPlaying={isPlaying}
               aspectRatio={aspectRatio}
@@ -1121,6 +1168,12 @@ export default function App() {
                     </span>
                   </div>
                 </div>
+                {selectedAsset.type === "video" && (
+                  <section className="inspector-section">
+                    {selectedAsset.normalized && <p className="helper-text">This legacy draft may use a reduced source. Relink an original when available.</p>}
+                    <button className="button secondary" onClick={handleRelinkOriginal} disabled={isExporting}>Relink original video</button>
+                  </section>
+                )}
                 <div className="inspector-section">
                   <label htmlFor="clip-filter">Look</label>
                   <select
@@ -1366,6 +1419,20 @@ export default function App() {
                     actual size varies
                   </p>
                 </section>
+                {videos.length > 0 && (
+                  <section className="inspector-section" aria-label="Preview optimization">
+                    <h3>Preview performance</h3>
+                    <p className="helper-text" role="status">
+                      {proxyState.filter(job => job.status === "ready").length} optimized preview(s).
+                      {proxyState.some(job => job.status === "queued" || job.status === "running") ? " Optimizing while idle…" : ""}
+                      {" "}Project files, original sound and exports use your originals.
+                    </p>
+                    <button className="button secondary" onClick={() => proxyQueue.request(mediaAssets)} disabled={isExporting}>Optimize previews</button>
+                    {proxyState.some(job => job.status === "queued" || job.status === "running") &&
+                      <button className="button secondary" onClick={proxyQueue.cancel}>Cancel optimization</button>}
+                    {proxyState.filter(job => job.status === "failed").map(job => <p key={job.sourceId} className="helper-text">{job.name}: {job.error}</p>)}
+                  </section>
+                )}
                 <details className="recorder">
                   <summary>
                     <Icon name="mic" />

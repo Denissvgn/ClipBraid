@@ -45,12 +45,15 @@ export function evaluate(file, name, scope = {}) {
 }
 
 // Load a dependency-free production module; type-only imports are erased.
-export function loadModule(file) {
+export function loadModule(file, imports = {}) {
   const source = ts.transpile(readFileSync(file, "utf8"), {
     target: ts.ScriptTarget.ES2022,
     module: ts.ModuleKind.CommonJS,
   });
   const exports = {};
-  new Function("exports", source)(exports);
+  new Function("exports", "require", source)(exports, name => {
+    if (!(name in imports)) throw new Error(`Missing test module dependency: ${name}`);
+    return imports[name];
+  });
   return exports;
 }
