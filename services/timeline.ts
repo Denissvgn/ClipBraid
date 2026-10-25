@@ -174,11 +174,22 @@ export function frameTimestamp(
   return start + index / fps;
 }
 
+function chronological(media: MediaAsset[]): MediaAsset[] {
+  return [...media].sort((a, b) => a.startTime - b.startTime);
+}
+
 export function nextAssets(
   media: MediaAsset[],
 ): Map<string, MediaAsset | undefined> {
-  const ordered = [...media].sort((a, b) => a.startTime - b.startTime);
+  const ordered = chronological(media);
   return new Map(ordered.map((asset, index) => [asset.id, ordered[index + 1]]));
+}
+
+export function previousAssets(
+  media: MediaAsset[],
+): Map<string, MediaAsset | undefined> {
+  const ordered = chronological(media);
+  return new Map(ordered.map((asset, index) => [asset.id, ordered[index - 1]]));
 }
 
 // Weights are used with additive compositing in both preview and export, so
@@ -187,17 +198,24 @@ export function clipOpacity(
   asset: MediaAsset,
   time: number,
   next?: MediaAsset,
+  previous?: MediaAsset,
 ): number {
   const local = time - asset.startTime;
   if (local < 0 || local >= asset.duration) return 0;
   let weight = 1;
-  if (asset.transitionDuration && local < asset.transitionDuration) {
-    weight = local / asset.transitionDuration;
+  if (previous && asset.transitionDuration) {
+    const overlap = Math.min(
+      asset.transitionDuration,
+      asset.duration,
+      intervalEnd(previous) - asset.startTime,
+    );
+    if (overlap > 0 && local < overlap) weight = local / overlap;
   }
   if (next?.transitionDuration) {
     const overlap = Math.min(
       next.transitionDuration,
-      asset.startTime + asset.duration - next.startTime,
+      next.duration,
+      intervalEnd(asset) - next.startTime,
     );
     const elapsed = time - next.startTime;
     if (overlap > 0 && elapsed >= 0)
@@ -211,6 +229,7 @@ export function clipOpacity(
 // Cache one timestamp: export asks for several clips at the same frame time.
 export function createOpacitySampler(media: MediaAsset[]) {
   const next = nextAssets(media);
+  const previous = previousAssets(media);
   let previousTime = NaN;
   const weights = new Map<string, number>();
   return (asset: MediaAsset, time: number) => {
@@ -219,7 +238,12 @@ export function createOpacitySampler(media: MediaAsset[]) {
       weights.clear();
       let sum = 0;
       for (const clip of media) {
-        const weight = clipOpacity(clip, time, next.get(clip.id));
+        const weight = clipOpacity(
+          clip,
+          time,
+          next.get(clip.id),
+          previous.get(clip.id),
+        );
         weights.set(clip.id, weight);
         sum += weight;
       }

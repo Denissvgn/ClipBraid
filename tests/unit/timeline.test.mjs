@@ -7,6 +7,7 @@ const {
   canvasFit,
   clampPlayhead,
   clampTransition,
+  createOpacitySampler,
   frameCount,
   frameTimestamp,
   intervalEnd,
@@ -134,4 +135,61 @@ test("playhead clamping covers seek, restore and shortened projects", () => {
   assert.equal(clampPlayhead(Number.POSITIVE_INFINITY, 5), 5);
   assert.equal(clampPlayhead(Number.NaN, 5), 0);
   assert.equal(clampPlayhead(1, 0), 0);
+});
+
+test("crossfade weights are continuous at actual overlap boundaries", () => {
+  const media = [
+    { id: "a", startTime: 0, duration: 1, transitionDuration: 0 },
+    { id: "b", startTime: 0.5, duration: 1, transitionDuration: 0.5 },
+  ];
+  const sample = createOpacitySampler(media);
+  for (const [time, expected] of [
+    [0.25, [1, 0]],
+    [0.49, [1, 0]],
+    [0.5, [1, 0]],
+    [0.75, [0.5, 0.5]],
+    [0.999, [0.002, 0.998]],
+    [1, [0, 1]],
+    [1.25, [0, 1]],
+  ]) {
+    const weights = media.map((clip) => sample(clip, time));
+    weights.forEach((weight, index) => closeTo(weight, expected[index]));
+    closeTo(weights.reduce((sum, weight) => sum + weight, 0), 1);
+  }
+});
+
+test("transition settings never fade a clip without actual overlap", () => {
+  for (const media of [
+    [
+      { id: "a", startTime: 0, duration: 1, transitionDuration: 0 },
+      { id: "b", startTime: 1, duration: 1, transitionDuration: 0.5 },
+    ],
+    [
+      { id: "a", startTime: 0, duration: 1, transitionDuration: 0 },
+      { id: "b", startTime: 2, duration: 1, transitionDuration: 0.5 },
+    ],
+    [{ id: "a", startTime: 0, duration: 1, transitionDuration: 0.5 }],
+  ]) {
+    const sample = createOpacitySampler(media);
+    const incoming = media[media.length - 1];
+    for (const time of [incoming.startTime, incoming.startTime + 0.25]) {
+      closeTo(sample(incoming, time), 1);
+    }
+  }
+});
+
+test("short three-way overlaps stay normalized at dense frame boundaries", () => {
+  const media = [
+    { id: "a", startTime: 0, duration: 1 },
+    { id: "b", startTime: 0.5, duration: 0.6, transitionDuration: 0.5 },
+    { id: "c", startTime: 0.6, duration: 1, transitionDuration: 0.5 },
+  ];
+  const sample = createOpacitySampler(media);
+  for (let frame = 0; frame <= 160; frame++) {
+    const time = frame / 100;
+    const weights = media.map((clip) => sample(clip, time));
+    assert.ok(weights.every((weight) => weight >= 0 && weight <= 1));
+    const total = weights.reduce((sum, weight) => sum + weight, 0);
+    closeTo(total, weights.some((weight) => weight > 0) ? 1 : 0);
+  }
 });

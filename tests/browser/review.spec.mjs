@@ -371,7 +371,7 @@ test("preview and encoded crossfades preserve brightness throughout the overlap"
         const canvas = new OffscreenCanvas(160, 90),
           ctx = canvas.getContext("2d"),
           pixels = [];
-        for (const time of [0.25, 0.75, 1.25]) {
+        for (const time of [0.25, 0.5, 0.75, 1, 1.25]) {
           const sample = await sink.getSample(time);
           sample.draw(ctx, 0, 0, 160, 90);
           sample.close();
@@ -388,13 +388,17 @@ test("preview and encoded crossfades preserve brightness throughout the overlap"
       filter: expression("App.tsx", "applyCanvasFilter"),
     },
   );
-  expect(pixels[0][0]).toBeGreaterThan(240);
-  expect(pixels[0][2]).toBeLessThan(10);
-  expect(pixels[2][2]).toBeGreaterThan(240);
-  expect(pixels[2][0]).toBeLessThan(10);
+  for (const pixel of [pixels[0], pixels[1]]) {
+    expect(pixel[0]).toBeGreaterThan(240);
+    expect(pixel[2]).toBeLessThan(10);
+  }
+  for (const pixel of [pixels[3], pixels[4]]) {
+    expect(pixel[2]).toBeGreaterThan(240);
+    expect(pixel[0]).toBeLessThan(10);
+  }
   for (const channel of [0, 2])
-    expect(Math.abs(pixels[1][channel] - preview[channel])).toBeLessThan(20);
-  expect(pixels[1][0] + pixels[1][2]).toBeGreaterThan(240);
+    expect(Math.abs(pixels[2][channel] - preview[channel])).toBeLessThan(20);
+  expect(pixels[2][0] + pixels[2][2]).toBeGreaterThan(240);
 });
 
 test("trimmed buffers exclude both boundaries and standalone tracks end at their duration", async ({
