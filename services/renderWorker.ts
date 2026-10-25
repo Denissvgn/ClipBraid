@@ -19,6 +19,7 @@ export async function renderInWorker(snapshot: ExportSnapshot, settings: RenderS
         if (data.jobId !== context.jobId) return;
         if (data.type === "log") context.addLog(data.message);
         if (data.type === "progress") context.setExportProgress(data.progress);
+        if (data.type === "diagnostic") context.diagnostic(data.point);
         if (data.type === "result") resolve(data.bytes);
         if (data.type === "error") reject(new Error(data.error));
       };

@@ -36,6 +36,7 @@ export interface ExportState {
   cleanupComplete: boolean;
   buildId: string;
   events: ExportEvent[];
+  diagnostics: Record<string, unknown>[];
 }
 export interface ExportContext {
   jobId: string;
@@ -47,6 +48,7 @@ export interface ExportContext {
   resources: ExportResources;
   beginDelivery(): void;
   event(type: ExportEventType, detail?: Record<string, unknown>): void;
+  diagnostic(point: Record<string, unknown>): void;
 }
 export type ExportRunner = (snapshot: ExportSnapshot, context: ExportContext) => Promise<ExportResult>;
 
@@ -110,7 +112,7 @@ export interface ExportDeadlines {
 /** One job owns a frozen edit/settings snapshot, original leases and all events. */
 export class ExportJobs {
   private state: ExportState = Object.freeze({ jobId: null, phase: "idle", active: false,
-    progress: 0, logs: [], error: null, result: null, phaseResults: [], cancellable: false, cleanupComplete: true, buildId: "unqualified", events: [] });
+    progress: 0, logs: [], error: null, result: null, phaseResults: [], cancellable: false, cleanupComplete: true, buildId: "unqualified", events: [], diagnostics: [] });
   private listeners = new Set<() => void>();
   private running: Promise<void> | null = null;
   private resources: ExportResources | null = null;
@@ -159,6 +161,8 @@ export class ExportJobs {
     Object.freeze(snapshot.audioTracks);
     const leases: SourceLease[] = [];
     const blobs = new Map<string, Blob>();
+    const diagnostics: Record<string, unknown>[] = [];
+    let diagnosticTimer: ReturnType<typeof setTimeout> | undefined;
     let abortCleanupTimer: ReturnType<typeof setTimeout> | undefined;
     resources.signal.addEventListener("abort", () => {
       abortCleanupTimer = setTimeout(() => {
@@ -185,6 +189,15 @@ export class ExportJobs {
     const context: ExportContext = {
       jobId,
       resources,
+      diagnostic: point => {
+        if (this.state.jobId !== jobId || !this.state.active) return;
+        diagnostics.push({ ...point, elapsedMs: Math.floor(performance.now() - started), ownedResources: resources.size, sourceLeases: leases.length });
+        if (diagnostics.length > 80) diagnostics.shift();
+        if (!diagnosticTimer) diagnosticTimer = setTimeout(() => {
+          diagnosticTimer = undefined;
+          if (this.state.jobId === jobId && this.state.active) update({ diagnostics: [...diagnostics] });
+        }, 250);
+      },
       beginDelivery: () => { context.event("delivery-started"); update({ cancellable: false }); },
       event: (type, detail = {}) => {
         if (this.state.jobId !== jobId || !this.state.active) return;
@@ -231,7 +244,7 @@ export class ExportJobs {
       }
     } catch (error) { setupError = error; }
     this.publish({ jobId, phase: "preparing", active: true, progress: 0, logs: [],
-      error: null, result: null, phaseResults: [], cancellable: true, cleanupComplete: false, buildId: this.buildId, events: [] });
+      error: null, result: null, phaseResults: [], cancellable: true, cleanupComplete: false, buildId: this.buildId, events: [], diagnostics: [] });
     armStage("preparing");
     context.addLog("EXPORT STARTED");
     context.event("started");
@@ -246,6 +259,8 @@ export class ExportJobs {
         resources.abort(cause);
         context.addLog(`EXPORT STOPPED: ${error}`);
       } finally {
+        clearTimeout(diagnosticTimer);
+        update({ diagnostics: [...diagnostics] });
         clearTimeout(abortCleanupTimer);
         clearTimeout(stageTimer); clearTimeout(idleTimer);
         this.publish({ phase: "cleaning", cancellable: false });

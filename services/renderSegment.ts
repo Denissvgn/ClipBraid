@@ -34,7 +34,7 @@ const applyCanvasFilter = (
 
 export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettings,
   getBlob: (id: string) => Promise<Blob>, addLog: (message: string) => void,
-  setExportProgress: (value: number) => void) {
+  setExportProgress: (value: number) => void, notify?: (point: Record<string, unknown>) => void) {
   const { targetWidth, targetHeight, videoBitrate, fps, frameDuration, fitMode } = settings;
   const opacityAt = createOpacitySampler(mediaAssets);
   const segmentProgress = { current: [0, 0] };
@@ -62,6 +62,9 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
   const sinks = new Map<string, VideoSampleSink>();
   const images = new Map<string, ImageBitmap>();
   const inputs: Input[] = [];
+  const trace = (operation: string, point: Record<string, unknown> = {}) => {
+    if (typeof notify === "function") notify({ operation, segment: index, inputs: inputs.length, images: images.size, ...point });
+  };
   const relevantAssets = mediaAssets.filter((asset) =>
     intervalsOverlap(asset, start, end),
   );
@@ -105,8 +108,10 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
         const sink = sinks.get(asset.id);
         if (!sink) throw new Error(`Missing decoder for ${asset.name}`);
         const local = sourceTimeAt(asset, t);
+        trace("decode-request", { clipId: asset.id, sourceTime: local, timelineTime: t, frame: i, liveSamples: decoded.size });
             if (i === 0) addLog("Decoding visual media");
             const sample = await sink.getSample(local);
+        trace("decode-ready", { clipId: asset.id, sourceTime: local, timelineTime: t, frame: i });
         if (!sample)
           throw new Error(
             `No decoded frame for ${asset.name} at ${local.toFixed(3)}s`,
@@ -136,7 +141,9 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
               src.setTimestamp(outTs);
               src.setDuration(frameDuration);
                   if (i === 0) addLog("Encoding visual media");
+                  trace("encode-request", { clipId: asset.id, frame: i, timelineTime: t });
                   await videoSource.add(src);
+                  trace("encode-ready", { frame: i });
               handled = true;
               passed++;
             }
@@ -193,7 +200,9 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
           });
           try {
                 if (i === 0) addLog("Encoding visual media");
+                trace("encode-request", { frame: i, timelineTime: t });
                 await videoSource.add(sample);
+                trace("encode-ready", { frame: i });
           } finally {
             sample.close();
           }
@@ -219,8 +228,10 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
       }
     }
     videoSource.close();
+    trace("finalize-request");
         addLog("Finalizing visual stream");
     await output.finalize();
+    trace("finalize-ready");
     finalized = true;
     segmentProgress.current[index] = 1;
     addLog(
