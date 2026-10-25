@@ -50,5 +50,13 @@
   "unsupported.bin": {
     "bytes": 39,
     "sha256": "1e52dc4c49df4248f9a1e9ecfc11fe3b7e6e545db4a49c4f998f3dbf83389824"
+  },
+  "drafts/legacy-unversioned.json": {
+    "bytes": 832,
+    "sha256": "adda4cf94de7248e35810321266b022abef9cd0a6336e9867e4905ff2e3ebeac"
+  },
+  "drafts/legacy-unversioned.migrated.json": {
+    "bytes": 868,
+    "sha256": "e457f3d76ead729e090fd4eaf8f46a00babff3353866122f5280c122fe7ac286"
   }
 }

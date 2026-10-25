@@ -6,7 +6,11 @@ import React, {
   useMemo,
 } from "react";
 import { Flow } from "./platform";
-import { parseProject, serializeProject } from "./services/project";
+import {
+  assertProjectSize,
+  parseProject,
+  serializeProject,
+} from "./services/project";
 import { MediaSourceStore, type SourceLease } from "./services/mediaSources";
 import {
   projectDuration,
@@ -480,9 +484,12 @@ export default function App() {
         } finally {
           probeLease.release();
         }
+        const id = crypto.randomUUID();
         staged.push({
-          id: crypto.randomUUID(),
-          mediaId: "",
+          id,
+          // No gallery reference for a local file: use the entry ID, the same
+          // default the project schema applies to missing references.
+          mediaId: id,
           sourceId: asset.sourceId,
           mimeType: file.type,
           name: file.name,
@@ -522,11 +529,12 @@ export default function App() {
       ]);
       storeRef.current!.pin(asset.sourceId);
       const timeStr = new Date().toLocaleTimeString("en-US", { hour12: false });
+      const id = crypto.randomUUID();
       setAudioTracks((prev) => [
         ...prev,
         {
-          id: crypto.randomUUID(),
-          mediaId: "",
+          id,
+          mediaId: id,
           sourceId: asset.sourceId,
           mimeType: audio.mimeType,
           name: `VOICE_${timeStr}`,
@@ -779,6 +787,15 @@ export default function App() {
   const handleLoadProject = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    // Gate on the real byte size before reading, parsing or allocating anything.
+    try {
+      assertProjectSize(file.size);
+    } catch (err) {
+      setStatus("LOAD ERROR");
+      sysLog("error", `Project load failed: ${String(err).slice(0, 120)}`);
+      e.target.value = "";
+      return;
+    }
     await loadProjectText(await file.text());
     e.target.value = "";
   };

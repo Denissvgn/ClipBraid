@@ -1,5 +1,38 @@
 import type { MediaAsset, AudioFragment, VisualFilter } from "../types";
 
+/** Current on-disk schema. Format identity is the schema, not the display name. */
+export const PROJECT_SCHEMA_VERSION = 1;
+/** Maximum accepted project document size in bytes (256 MiB). */
+export const MAX_PROJECT_BYTES = 256 * 1024 * 1024;
+/** Maximum accepted decoded media payload size in bytes (256 MiB). */
+export const MAX_MEDIA_BYTES = 256 * 1024 * 1024;
+/** Maximum accepted absolute timeline position or duration: 24 hours. */
+export const MAX_TIMELINE_SECONDS = 24 * 60 * 60;
+const MAX_SOURCE_FPS = 1000;
+const MAX_SOURCE_DIMENSION = 100000;
+
+// Reject oversized documents before JSON parsing, timeline allocation or URL
+// replacement. File callers pass the exact byte size; text callers pass the
+// UTF-16 length, which never exceeds the UTF-8 byte length.
+export function assertProjectSize(byteLength: number): void {
+  if (!Number.isFinite(byteLength) || byteLength < 0)
+    throw new Error("Invalid project file size.");
+  if (byteLength > MAX_PROJECT_BYTES)
+    throw new Error(
+      `Project file is too large (${byteLength} bytes); the limit is ${MAX_PROJECT_BYTES} bytes (256 MiB). ` +
+        "Reduce embedded media or split the draft. The file was not modified.",
+    );
+}
+
+// Four base64 characters encode at most three bytes; validate the encoded
+// length before decoding or staging any media bytes.
+export function assertMediaPayloadSize(base64Length: number): void {
+  if (base64Length > 4 * Math.ceil(MAX_MEDIA_BYTES / 3))
+    throw new Error(
+      `Media payload exceeds the ${MAX_MEDIA_BYTES}-byte limit; re-link a smaller source file.`,
+    );
+}
+
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Invalid project object.");
@@ -10,9 +43,21 @@ function text(value: unknown, label: string): string {
     throw new Error(`Invalid ${label}.`);
   return value;
 }
-function number(value: unknown, label: string, minimum = 0): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < minimum)
-    throw new Error(`Invalid ${label}.`);
+function number(
+  value: unknown,
+  label: string,
+  minimum = 0,
+  maximum = MAX_TIMELINE_SECONDS,
+): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    value < minimum ||
+    value > maximum
+  )
+    throw new Error(
+      `Invalid ${label}: expected a finite number in [${minimum}, ${maximum}].`,
+    );
   return value;
 }
 function choice<T extends string>(
@@ -28,13 +73,53 @@ function bool(value: unknown, fallback: boolean): boolean {
   if (typeof value !== "boolean") throw new Error("Invalid project flag.");
   return value;
 }
-function optionalNumber(value: unknown, label: string): number | undefined {
+function optionalNumber(
+  value: unknown,
+  label: string,
+  maximum = MAX_TIMELINE_SECONDS,
+): number | undefined {
   if (value === undefined || value === 0) return undefined;
-  return number(value, label, Number.MIN_VALUE);
+  return number(value, label, Number.MIN_VALUE, maximum);
+}
+
+// Unversioned documents are the original RED VOX draft format; version 1 uses
+// the same field names. Migration stamps the version and rebuilds missing or
+// empty media references from the entry ID (legacy drafts could persist an
+// empty reference; the payload itself is authoritative). Source media, trims,
+// transitions, audio offsets, canvas options and the playhead are preserved.
+// Unsupported versions are rejected before anything is modified.
+export function migrateProjectDocument(
+  value: unknown,
+): Record<string, unknown> {
+  const data = record(value);
+  const version = data.schemaVersion;
+  if (version === PROJECT_SCHEMA_VERSION) return data;
+  if (version !== undefined)
+    throw new Error(
+      `Unsupported project version ${JSON.stringify(version) ?? "unknown"}; ` +
+        `this build reads unversioned drafts and version ${PROJECT_SCHEMA_VERSION}. The file was not modified.`,
+    );
+  const migrated: Record<string, unknown> = {
+    ...data,
+    schemaVersion: PROJECT_SCHEMA_VERSION,
+  };
+  for (const key of ["mediaAssets", "audioTracks"]) {
+    const entries = data[key];
+    if (!Array.isArray(entries)) continue;
+    migrated[key] = entries.map((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry))
+        return entry; // strict validation reports malformed entries
+      const item = entry as Record<string, unknown>;
+      if (typeof item.mediaId === "string" && item.mediaId.trim())
+        return entry;
+      if (typeof item.id !== "string" || !item.id.trim()) return entry;
+      return { ...item, mediaId: item.id };
+    });
+  }
+  return migrated;
 }
 
 // Parse the complete serializable state before allocating or replacing any URLs.
-// Unversioned drafts are the original format; version 1 has the same fields.
 // Media bytes are returned once per unique payload as document-local sources;
 // callers stage them as immutable originals and remap the synthetic source IDs.
 export interface ProjectSourcePayload {
@@ -44,9 +129,14 @@ export interface ProjectSourcePayload {
   mimeType: string;
 }
 export function parseProject(textValue: string) {
-  const data = record(JSON.parse(textValue));
-  if (data.schemaVersion !== undefined && data.schemaVersion !== 1)
-    throw new Error("Unsupported project version.");
+  assertProjectSize(textValue.length);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(textValue);
+  } catch {
+    throw new Error("Project file is not valid JSON; no changes were made.");
+  }
+  const data = migrateProjectDocument(parsed);
   const media = data.mediaAssets ?? [];
   const audio = data.audioTracks ?? [];
   if (!Array.isArray(media) || !Array.isArray(audio))
@@ -55,6 +145,7 @@ export function parseProject(textValue: string) {
   const sources: ProjectSourcePayload[] = [];
   const sourceByKey = new Map<string, string>();
   const sourceFor = (base64: string, mimeType: string): string => {
+    assertMediaPayloadSize(base64.length);
     const key = `${mimeType}\u0000${base64}`;
     const existing = sourceByKey.get(key);
     if (existing) return existing;
@@ -71,7 +162,8 @@ export function parseProject(textValue: string) {
     return {
       item,
       id,
-      mediaId: typeof item.mediaId === "string" ? item.mediaId : id,
+      mediaId:
+        item.mediaId === undefined ? id : text(item.mediaId, "media reference"),
       name: text(item.name, "media name"),
       sourceId: sourceFor(
         text(item.base64, "media data"),
@@ -124,9 +216,9 @@ export function parseProject(textValue: string) {
       hasAudio: bool(item.hasAudio, type === "video"),
       muted: bool(item.muted, false),
       normalized: bool(item.normalized, false),
-      sourceFps: optionalNumber(item.sourceFps, "source frame rate"),
-      sourceWidth: optionalNumber(item.sourceWidth, "source width"),
-      sourceHeight: optionalNumber(item.sourceHeight, "source height"),
+      sourceFps: optionalNumber(item.sourceFps, "source frame rate", MAX_SOURCE_FPS),
+      sourceWidth: optionalNumber(item.sourceWidth, "source width", MAX_SOURCE_DIMENSION),
+      sourceHeight: optionalNumber(item.sourceHeight, "source height", MAX_SOURCE_DIMENSION),
     };
   });
   const audioTracks: AudioFragment[] = audio.map((value) => {
@@ -151,7 +243,11 @@ export function parseProject(textValue: string) {
       data.transitionDuration ?? 0.5,
       "transition duration",
     ),
-    currentTime: number(data.currentTime ?? 0, "playhead", -Number.MAX_VALUE),
+    currentTime: number(
+      data.currentTime ?? 0,
+      "playhead",
+      -MAX_TIMELINE_SECONDS,
+    ),
   };
 }
 
@@ -211,7 +307,7 @@ export async function serializeProject(
     });
   }
   return JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: PROJECT_SCHEMA_VERSION,
     mediaAssets,
     audioTracks,
     aspectRatio: state.aspectRatio,
