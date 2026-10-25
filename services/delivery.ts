@@ -11,6 +11,9 @@ export class DeliveryError extends Error {
 export function deliveryFailure(error: unknown): DeliveryError {
   if (error instanceof DeliveryError) return error;
   const name = (error as { name?: string })?.name;
+  const advertised = (error as { category?: DeliveryCategory })?.category;
+  if (advertised && ["cancelled","denied","unsupported","transport","unknown","rejected","size-limit"].includes(advertised))
+    return new DeliveryError(String(error), advertised, (error as {deliveryMayHaveStarted?:boolean}).deliveryMayHaveStarted ?? ["unknown","transport"].includes(advertised));
   const category = name === "AbortError" ? "cancelled" : name === "NotAllowedError" || name === "SecurityError" ? "denied" : name === "NotSupportedError" ? "unsupported" : "transport";
   return new DeliveryError(String(error), category, category === "transport");
 }

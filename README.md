@@ -35,10 +35,17 @@ be retried in the editor.
 Track volumes share the same overlap headroom in preview and export. New project
 files use format version 2; unversioned and version 1 drafts remain readable.
 
-This is an experimental editor. Picture/sound fidelity and recovery issues remain,
-and long exports can stall. File sizes are bitrate-based estimates; browser/device support
-varies. Keep original files and save drafts regularly; autosave and undo are not
-available yet. Existing JSON project files remain readable.
+Exports are resized/re-encoded to the chosen 480p/720p profile at up to 30 fps SDR.
+File sizes are advisory bitrate estimates; video handoff is capped at 96 MiB and
+host limits may be lower. Browser delivery reports download initiation.
+
+Local autosave offers browser revision recovery. Keep originals and download a
+separate project backup; browser storage can be removed externally. Undo is not
+available yet. The browser recorder supports early stop and cancel; host recording
+requires explicit stop/cancel hooks. Unsupported host capabilities are reported.
+
+This is an experimental editor. Physical browser/device/Flow support and broader
+media qualification remain in progress.
 
 ## Checks
 

@@ -6,7 +6,9 @@ import React, {
   useMemo,
   useSyncExternalStore,
 } from "react";
-import { Flow } from "./platform";
+import { Flow, audioFileType } from "./platform";
+import { platformFailure } from "./services/platformError";
+import { recordedDuration } from "./services/audioDuration";
 import {
   assertProjectSize,
   parseProject,
@@ -134,6 +136,14 @@ const base64ToBlob = (base64: string, mimeType: string): Blob => {
   if (!bytes.length) throw new Error("Empty media data.");
   return new Blob([bytes], { type: mimeType });
 };
+const probeAudioDuration = async (blob: Blob, url: string): Promise<number> => {
+  try { await probeDuration(url, "audio"); }
+  catch (error) {
+    // Streamable WebM recordings can omit duration metadata; inspect packets.
+    if (!(error instanceof Error) || error.message !== "Invalid media duration.") throw error;
+  }
+  return (await recordedDuration(blob)) / 1000;
+};
 const blobToBase64 = (blob: Blob): Promise<string> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -159,6 +169,10 @@ export default function App() {
 
   const [isRecording, setIsRecording] = useState(false);
   const [recDuration, setRecDuration] = useState(10);
+  const recordingRef = useRef<{ cancel: AbortController; stop: AbortController; epoch: number } | null>(null);
+  const recordingEpoch = useRef(0);
+  const [mediaNotice, setMediaNotice] = useState<{ category: string; message: string } | null>(null);
+  const mediaFailure = (error: unknown) => { const value = platformFailure(error); setMediaNotice({ category: value.category, message: value.message }); return value; };
 
   const [transitionDuration, setTransitionDuration] = useState(0.5);
   const [aspectRatio, setAspectRatio] = useState<"16:9" | "9:16" | "1:1">(
@@ -267,6 +281,7 @@ export default function App() {
   useEffect(() => {
     return () => {
       exportJobs.dispose();
+      recordingEpoch.current++; recordingRef.current?.cancel.abort();
       proxyQueue.dispose();
       storeRef.current!.clear();
     };
@@ -312,6 +327,7 @@ export default function App() {
     playbackStartTimeRef.current = performance.now();
   }, [currentTime, totalDuration]);
   const handleImportMedia = async () => {
+    setMediaNotice(null);
     const tx = storeRef.current!.beginTransaction();
     try {
       const selected = await Flow.media.select({ filter: "all" });
@@ -370,12 +386,14 @@ export default function App() {
         probeLease.release();
       }
     } catch (err) {
+      mediaFailure(err);
       tx.rollback();
       setStatus("IMPORT ERROR");
       sysLog("error", `Clip import failed: ${String(err).slice(0, 120)}`);
     }
   };
   const handleImportGalleryAudio = async () => {
+    setMediaNotice(null);
     const tx = storeRef.current!.beginTransaction();
     try {
       const selected = await Flow.media.select({ filter: "audio" });
@@ -393,7 +411,7 @@ export default function App() {
       const probeLease = tx.acquire(asset.sourceId, "import-probe");
       let duration: number;
       try {
-        duration = await probeDuration(probeLease.url, "audio");
+        duration = await probeAudioDuration(asset.bytes, probeLease.url);
       } finally {
         probeLease.release();
       }
@@ -417,6 +435,7 @@ export default function App() {
       );
       setStatus("READY");
     } catch (err) {
+      mediaFailure(err);
       tx.rollback();
       setStatus("AUDIO ERROR");
       sysLog("error", `Audio import failed: ${String(err).slice(0, 120)}`);
@@ -429,19 +448,21 @@ export default function App() {
     if (!files.length) return;
     const startTime = currentTime;
     const staged: AudioFragment[] = [];
+    setMediaNotice(null);
     const tx = storeRef.current!.beginTransaction();
     setStatus("IMPORTING AUDIO...");
     try {
+      const mimeTypes = files.map(audioFileType);
       // One batch: identical files share a single immutable source.
       const assets = await tx.stage(
-        files.map((file) => ({ bytes: file, mimeType: file.type })),
+        files.map((file, index) => ({ bytes: file, mimeType: mimeTypes[index] })),
       );
       for (const [index, file] of files.entries()) {
         const asset = assets[index];
         const probeLease = tx.acquire(asset.sourceId, "import-probe");
         let duration: number;
         try {
-          duration = await probeDuration(probeLease.url, "audio");
+          duration = await probeAudioDuration(asset.bytes, probeLease.url);
         } finally {
           probeLease.release();
         }
@@ -452,7 +473,7 @@ export default function App() {
           // default the project schema applies to missing references.
           mediaId: id,
           sourceId: asset.sourceId,
-          mimeType: file.type,
+          mimeType: mimeTypes[index],
           name: file.name,
           startTime,
           duration,
@@ -467,6 +488,7 @@ export default function App() {
       );
       setStatus("READY");
     } catch (error) {
+      mediaFailure(error);
       tx.rollback();
       setStatus("AUDIO ERROR");
       sysLog("error", `Audio import failed: ${String(error).slice(0, 120)}`);
@@ -479,11 +501,16 @@ export default function App() {
     setIsRecording(true);
     setIsPlaying(false);
     setStatus(`RECORDING...`);
+    setMediaNotice(null);
+    const capture = { cancel: new AbortController(), stop: new AbortController(), epoch: ++recordingEpoch.current };
+    recordingRef.current = capture;
     const tx = storeRef.current!.beginTransaction();
     try {
       const audio = await Flow.microphone.record({
-        durationMs: recDuration * 1000,
+        durationMs: recDuration * 1000, signal: capture.cancel.signal, stopSignal: capture.stop.signal,
       });
+      capture.cancel.signal.throwIfAborted();
+      if (capture.epoch !== recordingEpoch.current) throw new DOMException("Project changed", "AbortError");
       const [asset] = await tx.stage([
         {
           bytes: base64ToBlob(audio.base64, audio.mimeType),
@@ -513,9 +540,12 @@ export default function App() {
       );
     } catch (err) {
       tx.rollback();
-      setStatus("RECORD ERROR");
+      if (capture.epoch !== recordingEpoch.current) return;
+      const error = mediaFailure(err);
+      setStatus(error.category === "cancelled" ? "RECORD CANCELLED" : "RECORD ERROR");
       sysLog("error", `Voice recording failed: ${String(err).slice(0, 120)}`);
     } finally {
+      if (recordingRef.current === capture) recordingRef.current = null;
       setIsRecording(false);
     }
   };
@@ -683,7 +713,8 @@ export default function App() {
       );
       setStatus("READY");
     } catch (err) {
-      setStatus("SAVE ERROR");
+      const error = mediaFailure(err);
+      setStatus(error.category === "cancelled" ? "SAVE CANCELLED" : "SAVE ERROR");
       sysLog("error", `Project save failed: ${String(err).slice(0, 120)}`);
     } finally {
       for (const lease of leases) lease.release();
@@ -730,6 +761,7 @@ export default function App() {
       // project's sources only after that commit. Any failure before this
       // point rolls the transaction back and leaves the old project untouched.
       stagedIds.forEach((sourceId) => tx.pin(sourceId));
+      recordingEpoch.current++; recordingRef.current?.cancel.abort();
       setIsPlaying(false);
       setSelectedAssetId(null);
       setMediaAssets(restoredMedia);
@@ -989,8 +1021,12 @@ export default function App() {
           </button>
         </div>
       </header>
+      {mediaNotice && <div className="source-notice recovery-notice" role={mediaNotice.category === "cancelled" ? "status" : "alert"}>
+        <span>Media action {mediaNotice.category}: {mediaNotice.message}</span>
+        <button className="button secondary" onClick={() => setMediaNotice(null)}>Dismiss media message</button>
+      </div>}
       {exportState.result && <p className="source-notice" role="status" data-delivery-outcome={exportState.result.delivery}>
-        {exportState.result.delivery === "download-started" ? "Download started. Video/audio structure was checked; final disk storage is controlled by your browser." : "Host accepted the checked video. Host acceptance does not confirm final device storage."}
+        {exportState.result.delivery === "download-started" ? "Last export: Download started. Video/audio structure was checked; final disk storage is controlled by your browser." : "Last export: Host accepted the checked video. Host acceptance does not confirm final device storage."}
       </p>}
       {(recovery.available || recovery.status === "error" || recovery.status === "unavailable") && (
         <section className="source-notice recovery-notice" aria-label="Local project recovery"
@@ -1543,6 +1579,10 @@ export default function App() {
                     <Icon name="mic" />
                     {isRecording ? "Recording…" : "Start recording"}
                   </button>
+                  {isRecording && <>
+                    <button className="button secondary" onClick={() => recordingRef.current?.stop.abort()}>Stop recording and keep audio</button>
+                    <button className="button secondary" onClick={() => recordingRef.current?.cancel.abort()}>Cancel recording</button>
+                  </>}
                 </details>
                 <p className="inspector-tip">
                   Select a clip in the timeline to trim it, change its look or

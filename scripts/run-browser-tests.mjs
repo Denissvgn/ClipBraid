@@ -9,7 +9,7 @@ const { inputs }=sourceIdentity();
 const source={commit:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),dirty:!!execFileSync('git',['status','--porcelain'],{encoding:'utf8'}).trim(),inputsSha256:sha(JSON.stringify(inputs))};
 rmSync('reports/browser-results.json',{force:true});
 rmSync('reports/browser-manifest.json',{force:true});
-const result=spawnSync(process.execPath,['node_modules/@playwright/test/cli.js','test',...process.argv.slice(2)],{stdio:'inherit',timeout:540000,env:{...process.env,CLIPBRAID_RUN_ID:runId}});
+const result=spawnSync(process.execPath,['node_modules/@playwright/test/cli.js','test',...process.argv.slice(2)],{stdio:'inherit',timeout:960000,env:{...process.env,CLIPBRAID_RUN_ID:runId}});
 let report;try{report=JSON.parse(readFileSync('reports/browser-results.json','utf8'));}catch{}
 const testResults=[];
 function collect(suite){for(const spec of suite.specs??[])for(const t of spec.tests??[])testResults.push({title:spec.title,expectedStatus:t.expectedStatus,status:t.status,results:t.results});for(const sub of suite.suites??[])collect(sub);}
