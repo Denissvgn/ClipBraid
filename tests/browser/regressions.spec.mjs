@@ -124,6 +124,7 @@ test("mixed PCM ends at clip trim", async ({ context }, info) => {
         audioBufferToWav: new Function(wav)(),
       };
       Object.assign(scope, window.testRuntime.timeline);
+      Object.assign(scope, window.testRuntime.audio);
       const fn = new Function(...Object.keys(scope), mix)(
         ...Object.values(scope),
       );

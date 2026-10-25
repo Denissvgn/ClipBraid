@@ -12,6 +12,7 @@ import {
   serializeProject,
 } from "./services/project";
 import { MediaSourceStore, type SourceLease } from "./services/mediaSources";
+import { scheduleAudioChunk, type AudioSelection } from "./services/audio";
 import {
   activeIntervals,
   canvasFit,
@@ -975,70 +976,70 @@ export default function App() {
           Math.ceil(Math.max(1, totalDuration * 44100)),
           44100,
         );
-        for (const asset of mediaAssets) {
+        const mixSource = async (
+          sourceId: string,
+          name: string,
+          selection: AudioSelection,
+          allowSilentVideo = false,
+        ) => {
           signal?.throwIfAborted();
-          if (asset.type !== "video" || !asset.hasAudio || asset.muted)
-            continue;
           const input = new Input({
-            source: new BlobSource(await getBlob(asset.sourceId)),
+            source: new BlobSource(await getBlob(sourceId)),
             formats: ALL_FORMATS,
           });
           try {
             const track = await input.getPrimaryAudioTrack();
             // Older drafts may not know that a valid video is silent.
-            if (!track) continue;
+            if (!track) {
+              if (allowSilentVideo) return;
+              throw new Error("Missing audio track");
+            }
             if (!(await track.canDecode()))
               throw new Error("Unsupported audio codec");
             const sink = new AudioBufferSink(track);
-            const window = sourceWindow(asset);
-            const selectionEnd = window.start + asset.duration;
             for await (const wrapped of sink.buffers(
-              window.start,
-              selectionEnd,
+              selection.sourceStart,
+              selection.sourceEnd,
             )) {
               signal?.throwIfAborted();
-              const from = Math.max(wrapped.timestamp, window.start);
-              const to = Math.min(
-                wrapped.timestamp + wrapped.buffer.duration,
-                selectionEnd,
-              );
-              if (to <= from) continue;
-              const source = offlineCtx.createBufferSource();
-              source.buffer = wrapped.buffer;
-              source.connect(offlineCtx.destination);
-              source.start(
-                asset.startTime + from - window.start,
-                from - wrapped.timestamp,
-                to - from,
+              scheduleAudioChunk(
+                offlineCtx,
+                wrapped.buffer,
+                wrapped.timestamp,
+                selection,
               );
             }
           } catch (error) {
             throw new Error(
-              `Cannot decode audio for ${asset.name}: ${String(error)}`,
+              `Cannot decode audio for ${name}: ${String(error)}`,
             );
           } finally {
             input.dispose();
           }
+        };
+        for (const asset of mediaAssets) {
+          if (asset.type !== "video" || !asset.hasAudio || asset.muted)
+            continue;
+          const window = sourceWindow(asset);
+          await mixSource(
+            asset.sourceId,
+            asset.name,
+            {
+              sourceStart: window.start,
+              sourceEnd: Math.min(window.end, window.start + asset.duration),
+              timelineStart: asset.startTime,
+              timelineEnd: totalDuration,
+            },
+            true,
+          );
         }
         for (const track of audioTracks) {
-          signal?.throwIfAborted();
-          try {
-            const buffer = await offlineCtx.decodeAudioData(
-              await (await getBlob(track.sourceId)).arrayBuffer(),
-            );
-            const source = offlineCtx.createBufferSource();
-            source.buffer = buffer;
-            source.connect(offlineCtx.destination);
-            source.start(
-              track.startTime,
-              0,
-              Math.min(track.duration, buffer.duration),
-            );
-          } catch (error) {
-            throw new Error(
-              `Cannot decode audio for ${track.name}: ${String(error)}`,
-            );
-          }
+          await mixSource(track.sourceId, track.name, {
+            sourceStart: 0,
+            sourceEnd: track.duration,
+            timelineStart: track.startTime,
+            timelineEnd: totalDuration,
+          });
         }
         signal?.throwIfAborted();
         return audioBufferToWav(await offlineCtx.startRendering());

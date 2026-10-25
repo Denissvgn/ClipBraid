@@ -442,6 +442,8 @@ test("trimmed buffers exclude both boundaries and standalone tracks end at their
             muted: false,
             name: "trim",
             trimStart: 0.2,
+            trimEnd: 0.5,
+            originalDuration: 1,
             duration: 0.3,
             startTime: 0.4,
           },
@@ -452,6 +454,7 @@ test("trimmed buffers exclude both boundaries and standalone tracks end at their
         audioBufferToWav: new Function(wav)(),
       };
       Object.assign(scope, window.testRuntime.timeline);
+      Object.assign(scope, window.testRuntime.audio);
       const invoke = () =>
         new Function(...Object.keys(scope), mix)(...Object.values(scope))();
       const decode = async (bytes) =>
@@ -465,6 +468,8 @@ test("trimmed buffers exclude both boundaries and standalone tracks end at their
         pcm.slice(a * 44100, b * 44100).reduce((s, x) => s + Math.abs(x), 0) /
         Math.round((b - a) * 44100);
       scope.mediaAssets = [];
+      scope.Input = media.Input;
+      scope.AudioBufferSink = media.AudioBufferSink;
       scope.audioTracks = [{ name: "tone", startTime: 0.2, duration: 0.35 }];
       scope.getBlob = async () =>
         new Blob([Uint8Array.from(atob(tone), (c) => c.charCodeAt(0))]);
