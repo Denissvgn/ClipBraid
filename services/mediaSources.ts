@@ -34,6 +34,25 @@ export interface SourceLease {
   release(): void;
 }
 
+/**
+ * A unit of staging work (D04): imports and project loads stage bytes, probe
+ * them and only then publish them to the live project. `commit` hands the
+ * transaction's pins to the live project; `rollback` releases exactly the
+ * references the transaction added and disposes exactly the sources it staged,
+ * so a failure never revokes or leaks media owned by the previous project or
+ * by a running job. Rollback is idempotent and never throws; a transaction
+ * cannot be reused after either settlement.
+ */
+export interface SourceTransaction {
+  stage(items: { bytes: Blob; mimeType: string }[]): Promise<SourceAsset[]>;
+  /** Transaction-scoped probe lease; released on commit and on rollback. */
+  acquire(sourceId: string, purpose?: string): SourceLease;
+  /** Pre-pin before the state commit; already live-pinned sources are left alone. */
+  pin(sourceId: string): void;
+  commit(): void;
+  rollback(): void;
+}
+
 export interface DerivedMedia {
   /** Cache key, e.g. `proxy:720p:30`; combined with the source revision. */
   key: string;
@@ -158,11 +177,85 @@ export class MediaSourceStore {
     }
   }
 
+  /**
+   * Begin an atomic staging unit. Sources are still staged without URLs; the
+   * transaction only tracks which sources, pins and probe leases belong to it
+   * so settlement can release exactly those, in either direction.
+   */
+  beginTransaction(): SourceTransaction {
+    const staged = new Set<string>();
+    const pins = new Set<string>();
+    const leases = new Set<SourceLease>();
+    let settled = false;
+    const releaseLeases = () => {
+      for (const lease of leases) lease.release();
+      leases.clear();
+    };
+    return {
+      stage: async (items) => {
+        if (settled) throw new Error("Source transaction already settled.");
+        const assets = await this.stage(items);
+        for (const asset of assets) staged.add(asset.sourceId);
+        return assets;
+      },
+      acquire: (sourceId, purpose = "transaction-probe") => {
+        if (settled) throw new Error("Source transaction already settled.");
+        const lease = this.acquire(sourceId, purpose);
+        leases.add(lease);
+        return {
+          sourceId: lease.sourceId,
+          url: lease.url,
+          release: () => {
+            leases.delete(lease);
+            lease.release();
+          },
+        };
+      },
+      pin: (sourceId) => {
+        if (settled) throw new Error("Source transaction already settled.");
+        // A source the live project already pins is not this transaction's
+        // reference: rollback must not drop it, and re-pinning must not add a
+        // reference the pin set cannot release.
+        if (this.pinned.has(sourceId)) return;
+        this.pin(sourceId);
+        pins.add(sourceId);
+      },
+      commit: () => {
+        if (settled) throw new Error("Source transaction already settled.");
+        settled = true;
+        releaseLeases();
+        staged.clear();
+        pins.clear();
+      },
+      rollback: () => {
+        if (settled) return; // committed work is never rolled back
+        settled = true;
+        releaseLeases();
+        for (const sourceId of pins) {
+          if (!this.pinned.delete(sourceId)) continue;
+          const entry = this.entries.get(sourceId);
+          if (entry) this.release(entry, "transaction-rollback");
+        }
+        pins.clear();
+        for (const sourceId of staged) {
+          const entry = this.entries.get(sourceId);
+          // Someone else adopted the source: leave its lifecycle to them.
+          if (!entry || this.pinned.has(sourceId)) continue;
+          this.remove(sourceId);
+        }
+        staged.clear();
+      },
+    };
+  }
+
   /** Reference a source on behalf of the live project before commit. */
   pin(sourceId: string): void {
     const entry = this.entries.get(sourceId);
     if (!entry || entry.disposed)
       throw new Error(`Unknown media source: ${sourceId}`);
+    // The live project is a *set* of pins: re-pinning adds no reference, so a
+    // later syncPins/remove releases exactly one.
+    if (this.pinned.has(sourceId)) return;
     this.pinned.add(sourceId);
     this.retain(entry);
   }

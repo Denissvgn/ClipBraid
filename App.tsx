@@ -252,6 +252,8 @@ export default function App() {
   useEffect(() => {
     isExportingRef.current = isExporting;
   }, [isExporting]);
+  // One save at a time: each save serializes one leased, immutable snapshot.
+  const saveInFlightRef = useRef(false);
   const addLog = useCallback((msg: string) => {
     const elapsed = isExportingRef.current
       ? Math.floor(performance.now() - exportStartTimeRef.current)
@@ -343,19 +345,21 @@ export default function App() {
     [transitionDuration, clampTransition],
   );
   const handleImportMedia = async () => {
-    const staged: string[] = [];
+    const tx = storeRef.current!.beginTransaction();
     try {
       const selected = await Flow.media.select({ filter: "all" });
-      if (!selected) return;
+      if (!selected) {
+        tx.rollback();
+        return;
+      }
       setStatus("PROBING MEDIA...");
       if (selected.type !== "image" && selected.type !== "video")
         throw new Error("Choose a video or image.");
       // Host transport delivers base64; the store holds Blob originals.
-      const [asset] = await storeRef.current!.stage([
+      const [asset] = await tx.stage([
         { bytes: base64ToBlob(selected.base64, selected.mimeType), mimeType: selected.mimeType },
       ]);
-      staged.push(asset.sourceId);
-      const probeLease = storeRef.current!.acquire(asset.sourceId, "import-probe");
+      const probeLease = tx.acquire(asset.sourceId, "import-probe");
       try {
         const dur = await probeDuration(probeLease.url, selected.type);
         const {
@@ -385,7 +389,7 @@ export default function App() {
           sourceWidth: sourceWidth || undefined,
           sourceHeight: sourceHeight || undefined,
         };
-        storeRef.current!.pin(asset.sourceId);
+        tx.pin(asset.sourceId);
         setMediaAssets((prev) => {
           const last = prev[prev.length - 1];
           const trans = last
@@ -399,6 +403,7 @@ export default function App() {
             { ...newAssetBase, startTime: start, transitionDuration: trans },
           ];
         });
+        tx.commit();
         sysLog(
           "import",
           `Clip: ${selected.name} (${selected.type}, ${dur.toFixed(1)}s${sourceFps ? `, ${Number(sourceFps.toFixed(3))}fps` : ""}${sourceWidth ? `, ${sourceWidth}x${sourceHeight}` : ""})`,
@@ -408,32 +413,34 @@ export default function App() {
         probeLease.release();
       }
     } catch (err) {
-      staged.forEach((sourceId) => storeRef.current!.remove(sourceId));
+      tx.rollback();
       setStatus("IMPORT ERROR");
       sysLog("error", `Clip import failed: ${String(err).slice(0, 120)}`);
     }
   };
   const handleImportGalleryAudio = async () => {
-    const staged: string[] = [];
+    const tx = storeRef.current!.beginTransaction();
     try {
       const selected = await Flow.media.select({ filter: "audio" });
-      if (!selected) return;
+      if (!selected) {
+        tx.rollback();
+        return;
+      }
       setStatus("LOADING AUDIO...");
-      const [asset] = await storeRef.current!.stage([
+      const [asset] = await tx.stage([
         {
           bytes: base64ToBlob(selected.base64, selected.mimeType),
           mimeType: selected.mimeType,
         },
       ]);
-      staged.push(asset.sourceId);
-      const probeLease = storeRef.current!.acquire(asset.sourceId, "import-probe");
+      const probeLease = tx.acquire(asset.sourceId, "import-probe");
       let duration: number;
       try {
         duration = await probeDuration(probeLease.url, "audio");
       } finally {
         probeLease.release();
       }
-      storeRef.current!.pin(asset.sourceId);
+      tx.pin(asset.sourceId);
       setAudioTracks((prev) => [
         ...prev,
         {
@@ -446,13 +453,14 @@ export default function App() {
           duration,
         },
       ]);
+      tx.commit();
       sysLog(
         "import",
         `Audio track: ${selected.name} (${duration.toFixed(1)}s @ ${currentTime.toFixed(1)}s)`,
       );
       setStatus("READY");
     } catch (err) {
-      staged.forEach((sourceId) => storeRef.current!.remove(sourceId));
+      tx.rollback();
       setStatus("AUDIO ERROR");
       sysLog("error", `Audio import failed: ${String(err).slice(0, 120)}`);
     }
@@ -463,21 +471,17 @@ export default function App() {
     const files = Array.from(event.target.files || []);
     if (!files.length) return;
     const startTime = currentTime;
-    const stagedIds: string[] = [];
     const staged: AudioFragment[] = [];
+    const tx = storeRef.current!.beginTransaction();
     setStatus("IMPORTING AUDIO...");
     try {
       // One batch: identical files share a single immutable source.
-      const assets = await storeRef.current!.stage(
+      const assets = await tx.stage(
         files.map((file) => ({ bytes: file, mimeType: file.type })),
       );
-      stagedIds.push(...new Set(assets.map((asset) => asset.sourceId)));
       for (const [index, file] of files.entries()) {
         const asset = assets[index];
-        const probeLease = storeRef.current!.acquire(
-          asset.sourceId,
-          "import-probe",
-        );
+        const probeLease = tx.acquire(asset.sourceId, "import-probe");
         let duration: number;
         try {
           duration = await probeDuration(probeLease.url, "audio");
@@ -497,15 +501,16 @@ export default function App() {
           duration,
         });
       }
-      stagedIds.forEach((sourceId) => storeRef.current!.pin(sourceId));
+      staged.forEach((track) => tx.pin(track.sourceId));
       setAudioTracks((previous) => [...previous, ...staged]);
+      tx.commit();
       sysLog(
         "import",
         `Added ${staged.length} audio file(s) in parallel at ${startTime.toFixed(2)}s`,
       );
       setStatus("READY");
     } catch (error) {
-      stagedIds.forEach((sourceId) => storeRef.current!.remove(sourceId));
+      tx.rollback();
       setStatus("AUDIO ERROR");
       sysLog("error", `Audio import failed: ${String(error).slice(0, 120)}`);
     } finally {
@@ -517,17 +522,18 @@ export default function App() {
     setIsRecording(true);
     setIsPlaying(false);
     setStatus(`RECORDING...`);
+    const tx = storeRef.current!.beginTransaction();
     try {
       const audio = await Flow.microphone.record({
         durationMs: recDuration * 1000,
       });
-      const [asset] = await storeRef.current!.stage([
+      const [asset] = await tx.stage([
         {
           bytes: base64ToBlob(audio.base64, audio.mimeType),
           mimeType: audio.mimeType,
         },
       ]);
-      storeRef.current!.pin(asset.sourceId);
+      tx.pin(asset.sourceId);
       const timeStr = new Date().toLocaleTimeString("en-US", { hour12: false });
       const id = crypto.randomUUID();
       setAudioTracks((prev) => [
@@ -542,12 +548,14 @@ export default function App() {
           duration: audio.durationMs / 1000,
         },
       ]);
+      tx.commit();
       setStatus("READY");
       sysLog(
         "import",
         `Voice-over (${(audio.durationMs / 1000).toFixed(1)}s @ ${currentTime.toFixed(1)}s)`,
       );
     } catch (err) {
+      tx.rollback();
       setStatus("RECORD ERROR");
       sysLog("error", `Voice recording failed: ${String(err).slice(0, 120)}`);
     } finally {
@@ -670,70 +678,73 @@ export default function App() {
     handleDeleteMedia,
   ]);
   const handleSaveProject = async () => {
+    if (saveInFlightRef.current) return;
+    saveInFlightRef.current = true;
     setStatus("SAVING PROJECT...");
+    // One consistent snapshot of a single render's state. Every source is
+    // leased before the first await, so replacing or deleting the project
+    // mid-save retires pins but cannot purge the bytes this save is reading.
+    const snapshot = {
+      mediaAssets,
+      audioTracks,
+      aspectRatio,
+      fitMode,
+      transitionDuration,
+      currentTime,
+    };
+    let leases: SourceLease[] = [];
     try {
-      // One consistent snapshot; base64 appears only at this transport boundary.
-      const json = await serializeProject(
-        {
-          mediaAssets,
-          audioTracks,
-          aspectRatio,
-          fitMode,
-          transitionDuration,
-          currentTime,
-        },
-        async (sourceId) => {
-          const bytes = storeRef.current!.bytesFor(sourceId);
-          if (!bytes) throw new Error("Missing media source.");
-          return blobToBase64(bytes);
-        },
+      leases = storeRef.current!.acquireAll(
+        [...snapshot.mediaAssets, ...snapshot.audioTracks].map(
+          (item) => item.sourceId,
+        ),
+        "project-save",
       );
-      const blob = new Blob([json], {
-        type: "application/json",
+      // Base64 appears only at this transport boundary.
+      const json = await serializeProject(snapshot, async (sourceId) => {
+        const bytes = storeRef.current!.bytesFor(sourceId);
+        if (!bytes) throw new Error("Missing media source.");
+        return blobToBase64(bytes);
       });
-      const reader = new FileReader();
-      reader.onload = async () => {
-        try {
-          const base64 = (reader.result as string).split(",")[1];
-          const stamp = new Date()
-            .toISOString()
-            .replace(/[:.]/g, "-")
-            .slice(0, 16);
-          await Flow.download({
-            base64,
-            mimeType: "application/json",
-            filename: `clipbraid_project_${stamp}.json`,
-          });
-          sysLog(
-            "save",
-            `Project saved: ${mediaAssets.length} clips, ${audioTracks.length} audio tracks (${(base64.length / 1048576).toFixed(1)} MiB)`,
-          );
-          setStatus("READY");
-        } catch (err) {
-          setStatus("SAVE ERROR");
-          sysLog("error", `Project save failed: ${String(err).slice(0, 120)}`);
-        }
-      };
-      reader.readAsDataURL(blob);
+      const base64 = await blobToBase64(
+        new Blob([json], { type: "application/json" }),
+      );
+      const stamp = new Date()
+        .toISOString()
+        .replace(/[:.]/g, "-")
+        .slice(0, 16);
+      await Flow.download({
+        base64,
+        mimeType: "application/json",
+        filename: `clipbraid_project_${stamp}.json`,
+      });
+      sysLog(
+        "save",
+        `Project saved: ${snapshot.mediaAssets.length} clips, ${snapshot.audioTracks.length} audio tracks (${(base64.length / 1048576).toFixed(1)} MiB)`,
+      );
+      setStatus("READY");
     } catch (err) {
       setStatus("SAVE ERROR");
       sysLog("error", `Project save failed: ${String(err).slice(0, 120)}`);
+    } finally {
+      for (const lease of leases) lease.release();
+      saveInFlightRef.current = false;
     }
   };
   const loadProjectText = async (text: string): Promise<boolean> => {
     setStatus("LOADING PROJECT...");
-    const stagedIds: string[] = [];
+    const tx = storeRef.current!.beginTransaction();
     try {
       const data = parseProject(text);
       // Stage and validate every source before touching live state; identical
       // payloads share one immutable original. No URL exists until commit.
-      const staged = await storeRef.current!.stage(
+      const staged = await tx.stage(
         data.sources.map((source) => ({
           bytes: base64ToBlob(source.base64, source.mimeType),
           mimeType: source.mimeType,
         })),
       );
-      stagedIds.push(...new Set(staged.map((asset) => asset.sourceId)));
+      const stagedIds = [...new Set(staged.map((asset) => asset.sourceId))];
       const idMap = new Map(
         data.sources.map((source, index) => [
           source.sourceId,
@@ -755,9 +766,11 @@ export default function App() {
           projectDuration(restoredMedia, restoredAudio),
         ),
       );
-      // Pre-pin so URLs exist at the first render of the committed state; the
-      // pin-sync effect releases the replaced project's sources afterwards.
-      stagedIds.forEach((sourceId) => storeRef.current!.pin(sourceId));
+      // Commit: pre-pin so URLs exist at the first render, then publish one
+      // batched state update. The pin-sync effect releases the replaced
+      // project's sources only after that commit. Any failure before this
+      // point rolls the transaction back and leaves the old project untouched.
+      stagedIds.forEach((sourceId) => tx.pin(sourceId));
       setIsPlaying(false);
       setSelectedAssetId(null);
       setMediaAssets(restoredMedia);
@@ -771,6 +784,7 @@ export default function App() {
         mediaAssets: restoredMedia,
         audioTracks: restoredAudio,
       };
+      tx.commit();
       sysLog(
         "import",
         `Project loaded: ${restoredMedia.length} clips, ${restoredAudio.length} audio tracks`,
@@ -778,7 +792,7 @@ export default function App() {
       setStatus("READY");
       return true;
     } catch (err) {
-      stagedIds.forEach((sourceId) => storeRef.current!.remove(sourceId));
+      tx.rollback();
       setStatus("LOAD ERROR");
       sysLog("error", `Project load failed: ${String(err).slice(0, 120)}`);
       return false;
@@ -788,16 +802,17 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
     // Gate on the real byte size before reading, parsing or allocating anything.
+    // File reads are inside the same error boundary as staged load failures,
+    // and the input is reset even when the host filesystem read rejects.
     try {
       assertProjectSize(file.size);
+      await loadProjectText(await file.text());
     } catch (err) {
       setStatus("LOAD ERROR");
       sysLog("error", `Project load failed: ${String(err).slice(0, 120)}`);
+    } finally {
       e.target.value = "";
-      return;
     }
-    await loadProjectText(await file.text());
-    e.target.value = "";
   };
   // Test/measurement hook (test-mode dev server + ?e2e=1 only): loads a
   // draft from a URL and run the export — the local measurement harness.
