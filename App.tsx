@@ -11,12 +11,16 @@ import {
   assertProjectSize,
   parseProject,
   serializeProject,
+  validateProjectMetadata,
+  type ProjectSnapshot,
 } from "./services/project";
 import { MediaSourceStore, type SourceLease } from "./services/mediaSources";
 import { ExportJobs } from "./services/exportJob";
 import { runExportPipeline } from "./services/exportPipeline";
 import { ProxyQueue } from "./services/proxyQueue";
 import { renderProxy } from "./services/proxyRenderer";
+import { useProjectRecovery } from "./components/useProjectRecovery";
+import type { RecoveryData } from "./services/recovery";
 import {
   activeIntervals,
   clampPlayhead,
@@ -268,6 +272,12 @@ export default function App() {
     () => projectDuration(mediaAssets, audioTracks),
     [mediaAssets, audioTracks],
   );
+  const localSnapshot = useMemo(() => ({ mediaAssets, audioTracks, aspectRatio, fitMode,
+    transitionDuration, currentTime }), [mediaAssets, audioTracks, aspectRatio, fitMode, transitionDuration, currentTime]);
+  const localUI = useMemo(() => ({ exportQuality, zoom, showSafeZones, isTheaterMode }),
+    [exportQuality, zoom, showSafeZones, isTheaterMode]);
+  const recovery = useProjectRecovery(storeRef.current, localSnapshot, localUI, isPlaying, restoreLocal);
+  const recoveryStateRef = useRef(recovery); recoveryStateRef.current = recovery;
   const exportEstimate = useMemo(
     () => estimateExport(exportQuality, totalDuration),
     [exportQuality, totalDuration],
@@ -657,14 +667,15 @@ export default function App() {
         .toISOString()
         .replace(/[:.]/g, "-")
         .slice(0, 16);
-      await Flow.download({
+      const accepted = await Flow.download({
         base64,
         mimeType: "application/json",
         filename: `clipbraid_project_${stamp}.json`,
       });
+      if (!accepted) throw new Error("Project download was not acknowledged.");
       sysLog(
         "save",
-        `Project saved: ${snapshot.mediaAssets.length} clips, ${snapshot.audioTracks.length} audio tracks (${(base64.length / 1048576).toFixed(1)} MiB)`,
+        `Project file handed to download adapter: ${snapshot.mediaAssets.length} clips, ${snapshot.audioTracks.length} audio tracks (${(base64.length / 1048576).toFixed(1)} MiB)`,
       );
       setStatus("READY");
     } catch (err) {
@@ -675,22 +686,25 @@ export default function App() {
       saveInFlightRef.current = false;
     }
   };
-  const loadProjectText = async (text: string): Promise<boolean> => {
+  const loadProjectState = async (data: ProjectSnapshot, sources: { sourceId: string; bytes: Blob; mimeType: string }[]): Promise<boolean> => {
     setStatus("LOADING PROJECT...");
     const tx = storeRef.current!.beginTransaction();
     try {
-      const data = parseProject(text);
+      data = validateProjectMetadata(data);
+      const ids = new Set(sources.map(source => source.sourceId));
+      for (const item of [...data.mediaAssets, ...data.audioTracks])
+        if (!ids.has(item.sourceId)) throw new Error("Missing referenced source.");
       // Stage and validate every source before touching live state; identical
       // payloads share one immutable original. No URL exists until commit.
       const staged = await tx.stage(
-        data.sources.map((source) => ({
-          bytes: base64ToBlob(source.base64, source.mimeType),
+        sources.map((source) => ({
+          bytes: source.bytes,
           mimeType: source.mimeType,
         })),
       );
       const stagedIds = [...new Set(staged.map((asset) => asset.sourceId))];
       const idMap = new Map(
-        data.sources.map((source, index) => [
+        sources.map((source, index) => [
           source.sourceId,
           staged[index].sourceId,
         ]),
@@ -739,6 +753,24 @@ export default function App() {
       return false;
     }
   };
+  const loadProjectText = async (text: string): Promise<boolean> => {
+    try {
+      const data = parseProject(text);
+      return await loadProjectState(data, data.sources.map(source => ({
+        sourceId: source.sourceId, bytes: base64ToBlob(source.base64, source.mimeType), mimeType: source.mimeType,
+      })));
+    } catch (error) {
+      setStatus("LOAD ERROR"); sysLog("error", `Project load failed: ${String(error).slice(0, 120)}`); return false;
+    }
+  };
+  async function restoreLocal(data: RecoveryData) {
+    const restored = await loadProjectState(data.record.snapshot, data.sources);
+    if (restored) {
+      setExportQuality(data.record.ui.exportQuality); setZoom(data.record.ui.zoom);
+      setShowSafeZones(data.record.ui.showSafeZones); setIsTheaterMode(data.record.ui.isTheaterMode);
+    }
+    return restored;
+  }
   const handleLoadProject = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -807,6 +839,8 @@ export default function App() {
       },
       proxyState: proxyQueue.getSnapshot,
       mediaInventory: () => storeRef.current!.snapshot(),
+      localRecovery: () => ({ status: recoveryStateRef.current.status, revision: recoveryStateRef.current.revision,
+        usage: recoveryStateRef.current.usage }),
       exportState: exportJobs.getSnapshot,
       exportDeadlines: exportJobs.setDeadlines,
     };
@@ -950,6 +984,16 @@ export default function App() {
           </button>
         </div>
       </header>
+      {(recovery.available || recovery.status === "error" || recovery.status === "unavailable") && (
+        <section className="source-notice recovery-notice" aria-label="Local project recovery"
+          role={recovery.status === "error" || recovery.status === "unavailable" ? "alert" : "status"}>
+          <p>{recovery.message || "A committed local draft is available. Restore it, or keep the current project."}</p>
+          {recovery.available ? <>
+            <button className="button primary" onClick={() => void recovery.restore()} disabled={recovery.status === "restoring"}>Restore local revision</button>
+            <button className="button secondary" onClick={recovery.continueCurrent}>Keep current project</button>
+          </> : <button className="button secondary" onClick={() => void recovery.retry()}>Retry local storage</button>}
+        </section>
+      )}
       {status === "FATAL ERROR" && (
         <div className="source-notice" role="alert">
           <span>{errorDetail}</span>
@@ -1433,6 +1477,13 @@ export default function App() {
                     {proxyState.filter(job => job.status === "failed").map(job => <p key={job.sourceId} className="helper-text">{job.name}: {job.error}</p>)}
                   </section>
                 )}
+                <section className="inspector-section" aria-label="Local draft storage">
+                  <h3>Local drafts</h3>
+                  <p className="helper-text">Local autosave stays in this browser. Save project downloads a separate file. Browser data can be removed externally.</p>
+                  <p className="helper-text">{(recovery.usage.bytes / 1048576).toFixed(1)} MiB in {recovery.usage.revisions} local revision(s). Keeps up to two revisions within 128 MiB.</p>
+                  {recovery.quota && <p className="helper-text">Browser quota estimate: {(recovery.quota / 1048576).toFixed(0)} MiB.</p>}
+                  <button className="button secondary" onClick={() => void recovery.cleanOlder()} disabled={!recovery.revision || recovery.status === "saving"}>Remove older local revisions</button>
+                </section>
                 <details className="recorder">
                   <summary>
                     <Icon name="mic" />
@@ -1522,6 +1573,11 @@ export default function App() {
         >
           <span className="status-dot" />
           {displayStatus}
+        </span>
+        <span className="autosave-summary" role="status" data-autosave-status={recovery.status}>
+          {recovery.status === "saved" ? `Saved locally · revision ${recovery.revision}` :
+            recovery.status === "saving" ? "Saving locally…" : recovery.status === "choice" ? "Local recovery available" :
+            recovery.status === "unavailable" ? "Local autosave unavailable" : "Unsaved local changes"}
         </span>
         <span className="status-hint">
           Audio files start at the playhead. Add several to layer them.

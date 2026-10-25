@@ -137,11 +137,6 @@ export function parseProject(textValue: string) {
     throw new Error("Project file is not valid JSON; no changes were made.");
   }
   const data = migrateProjectDocument(parsed);
-  const media = data.mediaAssets ?? [];
-  const audio = data.audioTracks ?? [];
-  if (!Array.isArray(media) || !Array.isArray(audio))
-    throw new Error("Project media must be arrays.");
-  const ids = new Set<string>();
   const sources: ProjectSourcePayload[] = [];
   const sourceByKey = new Map<string, string>();
   const sourceFor = (base64: string, mimeType: string): string => {
@@ -154,6 +149,20 @@ export function parseProject(textValue: string) {
     sources.push({ sourceId, base64, mimeType });
     return sourceId;
   };
+  const state = validateMetadata(data, item => sourceFor(
+    text(item.base64, "media data"), text(item.mimeType, "media type")));
+  return { ...state, sources };
+}
+
+/** Validate Blob-backed local snapshots with the same edit/settings rules. */
+export function validateProjectMetadata(value: unknown): ProjectSnapshot {
+  return validateMetadata(record(value), item => text(item.sourceId, "source reference"));
+}
+function validateMetadata(data: Record<string, unknown>, resolveSource: (item: Record<string, unknown>) => string): ProjectSnapshot {
+  const media = data.mediaAssets ?? [];
+  const audio = data.audioTracks ?? [];
+  if (!Array.isArray(media) || !Array.isArray(audio)) throw new Error("Project media must be arrays.");
+  const ids = new Set<string>();
   function common(value: unknown) {
     const item = record(value);
     const id = text(item.id, "media ID");
@@ -165,10 +174,7 @@ export function parseProject(textValue: string) {
       mediaId:
         item.mediaId === undefined ? id : text(item.mediaId, "media reference"),
       name: text(item.name, "media name"),
-      sourceId: sourceFor(
-        text(item.base64, "media data"),
-        text(item.mimeType, "media type"),
-      ),
+      sourceId: resolveSource(item),
       mimeType: text(item.mimeType, "media type"),
       startTime: number(item.startTime, "start time"),
       duration: number(item.duration, "duration", Number.MIN_VALUE),
@@ -228,7 +234,6 @@ export function parseProject(textValue: string) {
   return {
     mediaAssets,
     audioTracks,
-    sources,
     aspectRatio: choice(
       data.aspectRatio ?? "16:9",
       ["16:9", "9:16", "1:1"] as const,
@@ -270,6 +275,7 @@ export async function serializeProject(
   state: ProjectSnapshot,
   sourceBase64: (sourceId: string) => Promise<string>,
 ): Promise<string> {
+  state = validateProjectMetadata(state);
   const mediaAssets = [];
   for (const clip of state.mediaAssets) {
     mediaAssets.push({
@@ -306,7 +312,7 @@ export async function serializeProject(
       duration: track.duration,
     });
   }
-  return JSON.stringify({
+  const json = JSON.stringify({
     schemaVersion: PROJECT_SCHEMA_VERSION,
     mediaAssets,
     audioTracks,
@@ -315,4 +321,6 @@ export async function serializeProject(
     transitionDuration: state.transitionDuration,
     currentTime: state.currentTime,
   });
+  assertProjectSize(new Blob([json]).size);
+  return json;
 }

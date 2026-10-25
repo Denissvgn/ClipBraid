@@ -411,6 +411,7 @@ button[aria-busy="true"] {
   padding-bottom: var(--space-xl);
   border-bottom: var(--rule-width) solid var(--color-rule);
 }
+.inspector-section .button { white-space: normal; min-width: 0; }
 .inspector-section label,
 .recorder label {
   display: flex;
@@ -776,6 +777,7 @@ input[type="range"]::-moz-range-thumb {
 }
 .editor-statusbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-xl);
   min-height: 36px;
@@ -1249,3 +1251,12 @@ select:hover:not(:disabled),
 .clip-select:focus-visible {
   outline-offset: -4px;
 }
+.autosave-summary {
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.recovery-notice p { flex-basis: 100%; margin: 0; }
+.recovery-notice .button { white-space: normal; }
+.editor-app:has(.recovery-notice) { height: auto; overflow: visible; }
+.editor-app:has(.recovery-notice) .editor-workspace { min-height: 440px; }

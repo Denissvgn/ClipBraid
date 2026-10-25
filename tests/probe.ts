@@ -8,9 +8,11 @@ import { createRoot } from "react-dom/client";
 import { AudioEngine } from "../components/AudioEngine";
 import { ExportResources } from "../services/exportJob";
 import { decodeAudioInWorker } from "../services/audioWorker";
+import { RecoveryStore } from "../services/recovery";
 Object.assign(window, {
   testRuntime: {
     media, ffmpegService, timeline, audio, React, createRoot, AudioEngine,
     lifecycle: { ExportResources, decodeAudioInWorker },
+    RecoveryStore,
   },
 });
