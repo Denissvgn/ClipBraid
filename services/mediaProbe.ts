@@ -40,16 +40,17 @@ export async function probeAsset(asset: MediaAsset | AudioFragment, blob: Blob):
       if (window.start < firstTimestamp - tolerance || end > endTimestamp + tolerance)
         throw new Error(`Selected video interval ${window.start.toFixed(3)}–${end.toFixed(3)}s is outside source ${firstTimestamp.toFixed(3)}–${endTimestamp.toFixed(3)}s.`);
       const sink = new VideoSampleSink(track);
-      for (const time of [Math.max(firstTimestamp, window.start), Math.max(window.start, Math.min(endTimestamp, end) - tolerance)]) {
-        const sample = await sink.getSample(time);
-        if (!sample) throw new Error(`No decoded video frame at ${time.toFixed(3)}s.`);
+      const times = [Math.max(firstTimestamp, window.start), Math.max(window.start, Math.min(endTimestamp, end) - tolerance)];
+      const samples = sink.samplesAtTimestamps(times);
+      try { for await (const sample of samples) {
+        if (!sample) throw new Error("No decoded video frame in the selected interval.");
         try {
           result.video = { width: sample.displayWidth, height: sample.displayHeight, rotation: sample.rotation,
             codec: String(await track.getCodec()), fps, firstTimestamp, endTimestamp, colorSpace,
             variableFrameRate: !metrics.frameRateIsConstant,
             pixelAspectRatio: sample.pixelAspectRatio ?? { num: 1, den: 1 } };
         } finally { sample.close(); }
-      }
+      } } finally { await samples.return(); }
       if (!result.video || result.video.width <= 0 || result.video.height <= 0 || result.video.width * result.video.height > 32_000_000)
         throw new Error("Unsupported video geometry.");
     }
@@ -62,10 +63,10 @@ export async function probeAsset(asset: MediaAsset | AudioFragment, blob: Blob):
       if (required) {
         if (!decodable) throw new Error("Unsupported audio codec.");
         const start = kind === "video" ? (asset as MediaAsset).trimStart : 0, end = Math.min(endTimestamp, start + asset.duration);
-        if (end > Math.max(start, firstTimestamp)) for (const time of [Math.max(start, firstTimestamp), Math.max(start, end - 0.05)]) {
-          const sample = await new AudioSampleSink(audio).getSample(time);
-          if (!sample) throw new Error(`No decoded audio at ${time.toFixed(3)}s.`);
-          sample.close();
+        if (end > Math.max(start, firstTimestamp)) {
+          const samples = new AudioSampleSink(audio).samplesAtTimestamps([Math.max(start, firstTimestamp), Math.max(start, end - 0.05)]);
+          try { for await (const sample of samples) { if (!sample) throw new Error("No decoded audio in the selected interval."); sample.close(); } }
+          finally { await samples.return(); }
         }
       }
     }

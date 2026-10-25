@@ -1,5 +1,5 @@
 import type { MediaAsset, VisualFilter } from "../types";
-import { activeIntervals, canvasFit, createOpacitySampler, frameCount, frameTimestamp, intervalsOverlap, sourceTimeAt } from "./timeline";
+import { activeIntervals, canvasFit, createOpacitySampler, frameCount, frameTimestamp, intervalsOverlap, isIntervalActive, sourceTimeAt } from "./timeline";
 import { Input, Output, Mp4OutputFormat, BufferTarget, BlobSource, ALL_FORMATS, VideoSampleSource, VideoSample, VideoSampleSink } from "mediabunny";
 export interface RenderSettings { targetWidth: number; targetHeight: number; videoBitrate: number; fps: number; frameDuration: number; fitMode: "contain" | "cover"; frameStart?: number; frameEnd?: number; hardwareAcceleration?: "no-preference" | "prefer-software" }
 const applyCanvasFilter = (
@@ -46,6 +46,8 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
 ): Promise<Uint8Array> => {
   const segmentDuration = end - start;
   if (segmentDuration <= 0) return new Uint8Array(0);
+  const totalFrames = settings.frameStart === undefined ? frameCount(segmentDuration, fps) : settings.frameEnd! - settings.frameStart;
+  const timelineTime = (i: number) => settings.frameStart === undefined ? frameTimestamp(i, fps, start) : frameTimestamp(settings.frameStart + i, fps);
   const output = new Output({
     format: new Mp4OutputFormat({ fastStart: "in-memory" }),
     target: new BufferTarget(),
@@ -60,10 +62,12 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
   const canvas = new OffscreenCanvas(targetWidth, targetHeight);
   const ctx = canvas.getContext("2d", { alpha: false, colorSpace: "srgb" })!;
   const sinks = new Map<string, VideoSampleSink>();
+  const streams = new Map<string, { input: Input; times: number[]; remaining: number; iterator?: AsyncIterator<VideoSample | null>; closed: boolean }>();
+  const activeInputs = new Set<Input>();
   const images = new Map<string, ImageBitmap>();
   const inputs: Input[] = [];
   const trace = (operation: string, point: Record<string, unknown> = {}) => {
-    if (typeof notify === "function") notify({ operation, segment: index, inputs: inputs.length, images: images.size, ...point });
+    if (typeof notify === "function") notify({ operation, segment: index, inputs: activeInputs.size, images: images.size, ...point });
   };
   const relevantAssets = mediaAssets.filter((asset) =>
     intervalsOverlap(asset, start, end),
@@ -85,32 +89,40 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
             formats: ALL_FORMATS,
           });
           inputs.push(input);
+          activeInputs.add(input);
           const track = await input.getPrimaryVideoTrack();
           if (!track || !(await track.canDecode()))
             throw new Error("Missing or unsupported video track");
           sinks.set(asset.id, new VideoSampleSink(track));
+          const times: number[] = [];
+          for (let frame = 0; frame < totalFrames; frame++) if (isIntervalActive(asset, timelineTime(frame))) times.push(sourceTimeAt(asset, timelineTime(frame)));
+          streams.set(asset.id, { input, times, remaining: times.length, closed: false });
         }
       } catch (error) {
         throw new Error(`Cannot decode ${asset.name}: ${String(error)}`);
       }
     }
     await output.start();
-    const totalFrames = settings.frameStart === undefined ? frameCount(segmentDuration, fps) : settings.frameEnd! - settings.frameStart;
     const segmentStarted = performance.now();
     for (let i = 0; i < totalFrames; i++) {
       signal?.throwIfAborted();
-      const t = settings.frameStart === undefined ? frameTimestamp(i, fps, start) : frameTimestamp(settings.frameStart + i, fps);
+      const t = timelineTime(i);
       const outTs = frameTimestamp(i, fps);
       const visible = activeIntervals(relevantAssets, t);
       const decoded = new Map<string, VideoSample>();
       const frameFor = async (asset: MediaAsset) => {
         if (decoded.has(asset.id)) return decoded.get(asset.id)!;
         const sink = sinks.get(asset.id);
-        if (!sink) throw new Error(`Missing decoder for ${asset.name}`);
+        const stream = streams.get(asset.id);
+        if (!sink || !stream) throw new Error(`Missing decoder for ${asset.name}`);
         const local = sourceTimeAt(asset, t);
         trace("decode-request", { clipId: asset.id, sourceTime: local, timelineTime: t, frame: i, liveSamples: decoded.size });
             if (i === 0) addLog("Decoding visual media");
-            const sample = await sink.getSample(local);
+        // This iterator owns one decoder for the clip's monotonic frame grid.
+        // getSample() per frame would create/restart a decoder for every query.
+        stream.iterator ??= sink.samplesAtTimestamps(stream.times)[Symbol.asyncIterator]();
+        const next = await stream.iterator.next(), sample = next.value;
+        stream.remaining--;
         trace("decode-ready", { clipId: asset.id, sourceTime: local, timelineTime: t, frame: i });
         if (!sample)
           throw new Error(
@@ -210,6 +222,10 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
         }
       } finally {
         decoded.forEach((sample) => sample.close());
+        for (const [id, stream] of streams) if (!stream.closed && stream.remaining === 0) {
+          await stream.iterator?.return?.(); stream.input.dispose(); activeInputs.delete(stream.input); stream.closed = true;
+          trace("input-released", { clipId: id });
+        }
       }
       if (i % 200 === 199 || i === totalFrames - 1) {
         const seconds = (performance.now() - segmentStarted) / 1000;
@@ -239,6 +255,7 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
     );
     return new Uint8Array(output.target.buffer!);
   } finally {
+    for (const stream of streams.values()) await stream.iterator?.return?.();
     if (!finalized) await output.cancel().catch(() => {});
     images.forEach((image) => image.close());
     inputs.forEach((input) => input.dispose());
