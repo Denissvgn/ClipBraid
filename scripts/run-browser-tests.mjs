@@ -1,11 +1,11 @@
+import { sourceIdentity } from './source-identity.mjs';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import os from 'node:os';
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
 const runId=randomUUID();mkdirSync('reports',{recursive:true});
-const sourcePaths=execFileSync('git',['ls-files','--cached','--others','--exclude-standard','-z'],{encoding:'utf8'}).split('\0').filter(Boolean);
-const inputs=[...new Set(sourcePaths)].filter(path=>/\.(tsx?|m?js|css|html|json|ya?ml)$/.test(path)||['.node-version','.npmrc'].includes(path)).filter(path=>!path.startsWith('test-data/')).sort().map(path=>({path,sha256:sha(readFileSync(path))}));
+const { inputs }=sourceIdentity();
 const source={commit:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),dirty:!!execFileSync('git',['status','--porcelain'],{encoding:'utf8'}).trim(),inputsSha256:sha(JSON.stringify(inputs))};
 rmSync('reports/browser-results.json',{force:true});
 rmSync('reports/browser-manifest.json',{force:true});

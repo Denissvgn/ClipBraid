@@ -8,6 +8,12 @@ import {
   exportVerdict,
 } from "../../mcp-server/lib.js";
 
+test("structured export delivery states do not imply device persistence", () => {
+  for (const [type, verdict] of [["download-started","DOWNLOAD_STARTED"],["host-accepted","HOST_ACCEPTED"],["unknown","UNKNOWN"],["cancelled","CANCELLED"],["failed","FAILED"]])
+    assert.equal(exportVerdict(`EXPORT STARTED\nEXPORT EVENT ${JSON.stringify({schemaVersion:1,jobId:"job",buildId:"build",type})}`),verdict);
+  assert.equal(exportVerdict(`EXPORT STARTED\nEXPORT EVENT ${JSON.stringify({schemaVersion:1,jobId:"job",buildId:"build",type:"started"})}\nFinal payload: 10 MiB\nEXPORT COMPLETE`),"RUNNING");
+});
+
 test("MCP journal parser keeps historical entries in order", () => {
   assert.deepEqual(parseJournal("# Header\n\n## New\n- new\n\n## Old\n- old"), [
     { title: "New", body: "- new" },

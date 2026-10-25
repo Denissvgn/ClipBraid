@@ -1,4 +1,5 @@
-import { renderVisualPlan } from "./encoderPlan";
+import { renderVisualPlan, validateSegments } from "./encoderPlan";
+import { deliverVideo, deliveryFailure } from "./delivery";
 import { outputProfile, frameSegments } from "./outputProfile";
 import { renderInWorker } from "./renderWorker";
 import { preflightAssets } from "./preflight";
@@ -221,6 +222,13 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
       "master.mp4",
     )) as Uint8Array;
     report({ phase: "muxing", videoBytes: masterBytes.byteLength });
+    await validateSegments([masterBytes], profile, frameSegments(profile, 1), context);
+    const verifiedInput = new Input({ source: new BlobSource(new Blob([masterBytes as Uint8Array<ArrayBuffer>])), formats: ALL_FORMATS });
+    const releaseVerification = resources.own(() => verifiedInput.dispose());
+    try {
+      if (!(await resources.wait(verifiedInput.getPrimaryAudioTrack(), releaseVerification))) throw new Error("Muxed output is missing its audio stream.");
+      context.event("verified", { videoFrames: profile.frames, width: profile.width, height: profile.height, bytes: masterBytes.byteLength });
+    } finally { await releaseVerification(); }
     phase("saving");
     const b64 = await blobToBase64(
       new Blob([masterBytes.buffer as ArrayBuffer], { type: "video/mp4" }), resources.signal,
@@ -233,27 +241,27 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
     try {
       resources.signal.throwIfAborted();
       context.beginDelivery();
-      const saved = await resources.wait(Flow.save({
+      const receipt = await resources.wait(deliverVideo({
         base64: b64,
         mimeType: "video/mp4",
         name: "clipbraid_video.mp4", signal: resources.signal,
       }));
-      if (!saved)
-        throw new Error("Save adapter rejected the video.");
-      addLog("EXPORT COMPLETE: save adapter accepted the video");
+      context.event(receipt.outcome, { bytes: masterBytes.byteLength });
+      addLog(receipt.outcome === "download-started" ? "DOWNLOAD STARTED: browser initiated the video download" : "HOST ACCEPTED: host acknowledged the video");
       sysLog(
         "save",
         `Video handed to save adapter: clipbraid_video.mp4 (${(b64.length / 1048576).toFixed(1)} MiB base64)`,
       );
+      report({ phase: "saving", accepted: true });
+      return { videoBytes: masterBytes.byteLength, delivery: receipt.outcome };
     } catch (e) {
-      throw new Error(
-        `Save not acknowledged (${(masterBytes.byteLength / 1048576).toFixed(1)} MiB video); delivery may have started: ${String(e)}`,
-      );
+      const error = deliveryFailure(e);
+      context.event(error.category === "cancelled" ? "cancelled" : error.deliveryMayHaveStarted ? "unknown" : "failed",
+        { category: error.category, message: error.message, deliveryMayHaveStarted: error.deliveryMayHaveStarted });
+      throw error;
     }
 
 
-    report({ phase: "saving", accepted: true });
-    return { videoBytes: masterBytes.byteLength, delivery: "adapter-accepted" };
   } finally {
     for (const name of ["seg1.mp4", "seg2.mp4", "mix.wav", "list.txt", "joined.mp4", "master.mp4"]) {
       try { await ffmpegService.deleteFile(name); } catch { /* worker may have reset */ }

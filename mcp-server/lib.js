@@ -50,8 +50,17 @@ export const LOG_ALLOWLIST = new Set(Object.values(LOG_NAMES));
 export function exportVerdict(logText) {
   const start = logText.lastIndexOf("EXPORT STARTED");
   const run = start < 0 ? logText : logText.slice(start);
+  const events = run.split("\n").flatMap(line => {
+    const index = line.indexOf("EXPORT EVENT ");
+    if (index < 0) return [];
+    try { const event = JSON.parse(line.slice(index + 13)); return event.schemaVersion === 1 && event.jobId && event.buildId ? [event] : []; }
+    catch { return []; }
+  });
+  const terminal = events.filter(event => ["failed", "cancelled", "unknown", "download-started", "host-accepted"].includes(event.type)).at(-1);
+  if (terminal) return ({ failed: "FAILED", cancelled: "CANCELLED", unknown: "UNKNOWN", "download-started": "DOWNLOAD_STARTED", "host-accepted": "HOST_ACCEPTED" })[terminal.type];
+  if (events.length) return "RUNNING";
   if (
-    /Master Export Failed|EXPORT FAILED|Export failed|Save rejected/.test(run)
+    /Master Export Failed|EXPORT FAILED|EXPORT STOPPED|Export failed|Save rejected/.test(run)
   )
     return "FAILED";
   if (run.includes("STALL")) return "STALLED";

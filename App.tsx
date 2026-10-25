@@ -22,6 +22,7 @@ import { renderProxy } from "./services/proxyRenderer";
 import { useProjectRecovery } from "./components/useProjectRecovery";
 import type { RecoveryData } from "./services/recovery";
 import { mixPolicy, trackGain } from "./services/mixing";
+import { BUILD_ID } from "./services/buildIdentity";
 import {
   activeIntervals,
   clampPlayhead,
@@ -198,7 +199,7 @@ export default function App() {
   const storeRef = useRef<MediaSourceStore | null>(null);
   if (!storeRef.current) storeRef.current = new MediaSourceStore();
   const exportJobsRef = useRef<ExportJobs | null>(null);
-  if (!exportJobsRef.current) exportJobsRef.current = new ExportJobs(storeRef.current, runExportPipeline);
+  if (!exportJobsRef.current) exportJobsRef.current = new ExportJobs(storeRef.current, runExportPipeline, {}, BUILD_ID);
   const exportJobs = exportJobsRef.current;
   const proxyQueueRef = useRef<ProxyQueue | null>(null);
   if (!proxyQueueRef.current) proxyQueueRef.current = new ProxyQueue(storeRef.current, renderProxy);
@@ -896,7 +897,8 @@ export default function App() {
       ? "Ready"
       : status.charAt(0) + status.slice(1).toLowerCase();
   return (
-    <div className={`editor-app ${isTheaterMode ? "theater-mode" : ""}`}>
+    <div className={`editor-app ${isTheaterMode ? "theater-mode" : ""}`} data-build-id={BUILD_ID}>
+      <output hidden id="export-evidence" aria-hidden="true">{JSON.stringify(exportState)}</output>
       {showIntro && <IntroModal onDismiss={() => setShowIntro(false)} />}
       {showJournal && (
         <JournalViewer
@@ -987,6 +989,9 @@ export default function App() {
           </button>
         </div>
       </header>
+      {exportState.result && <p className="source-notice" role="status" data-delivery-outcome={exportState.result.delivery}>
+        {exportState.result.delivery === "download-started" ? "Download started. Video/audio structure was checked; final disk storage is controlled by your browser." : "Host accepted the checked video. Host acceptance does not confirm final device storage."}
+      </p>}
       {(recovery.available || recovery.status === "error" || recovery.status === "unavailable") && (
         <section className="source-notice recovery-notice" aria-label="Local project recovery"
           role={recovery.status === "error" || recovery.status === "unavailable" ? "alert" : "status"}>

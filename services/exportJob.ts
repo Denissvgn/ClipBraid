@@ -20,7 +20,9 @@ export type ExportPhaseResult =
   | { phase: "rendering"; segments: number[]; audioBytes: number; plan?: "single" | "parallel"; attempts?: number; preference?: string }
   | { phase: "muxing"; videoBytes: number }
   | { phase: "saving"; accepted: true };
-export interface ExportResult { videoBytes: number; delivery: "adapter-accepted" }
+export interface ExportResult { videoBytes: number; delivery: "download-started" | "host-accepted" }
+export type ExportEventType = "started" | "rendered" | "muxed" | "verified" | "delivery-started" | "download-started" | "host-accepted" | "failed" | "cancelled" | "unknown";
+export interface ExportEvent { schemaVersion: 1; jobId: string; buildId: string; type: ExportEventType; elapsedMs: number; detail: Record<string, unknown> }
 export interface ExportState {
   jobId: string | null;
   phase: ExportPhase;
@@ -32,6 +34,8 @@ export interface ExportState {
   phaseResults: ExportPhaseResult[];
   cancellable: boolean;
   cleanupComplete: boolean;
+  buildId: string;
+  events: ExportEvent[];
 }
 export interface ExportContext {
   jobId: string;
@@ -42,6 +46,7 @@ export interface ExportContext {
   report(result: ExportPhaseResult): void;
   resources: ExportResources;
   beginDelivery(): void;
+  event(type: ExportEventType, detail?: Record<string, unknown>): void;
 }
 export type ExportRunner = (snapshot: ExportSnapshot, context: ExportContext) => Promise<ExportResult>;
 
@@ -105,7 +110,7 @@ export interface ExportDeadlines {
 /** One job owns a frozen edit/settings snapshot, original leases and all events. */
 export class ExportJobs {
   private state: ExportState = Object.freeze({ jobId: null, phase: "idle", active: false,
-    progress: 0, logs: [], error: null, result: null, phaseResults: [], cancellable: false, cleanupComplete: true });
+    progress: 0, logs: [], error: null, result: null, phaseResults: [], cancellable: false, cleanupComplete: true, buildId: "unqualified", events: [] });
   private listeners = new Set<() => void>();
   private running: Promise<void> | null = null;
   private resources: ExportResources | null = null;
@@ -113,6 +118,7 @@ export class ExportJobs {
     private store: Pick<MediaSourceStore, "acquireAll" | "bytesFor">,
     private run: ExportRunner,
     private deadlines: ExportDeadlines = {},
+    private buildId = "unqualified",
   ) {}
   setDeadlines = (deadlines: ExportDeadlines) => { if (!this.running) this.deadlines = deadlines; };
   cancel = () => {
@@ -179,7 +185,14 @@ export class ExportJobs {
     const context: ExportContext = {
       jobId,
       resources,
-      beginDelivery: () => { update({ cancellable: false }); },
+      beginDelivery: () => { context.event("delivery-started"); update({ cancellable: false }); },
+      event: (type, detail = {}) => {
+        if (this.state.jobId !== jobId || !this.state.active) return;
+        const event: ExportEvent = { schemaVersion: 1, jobId, buildId: this.buildId, type,
+          elapsedMs: Math.floor(performance.now() - started), detail };
+        update({ events: [...this.state.events.slice(-79), event],
+          logs: [...this.state.logs.slice(-19), `EXPORT EVENT ${JSON.stringify(event)}`] });
+      },
       getBlob: async id => {
         const blob = id ? blobs.get(id) : undefined;
         if (!blob) throw new Error("Missing media source in export snapshot.");
@@ -201,7 +214,11 @@ export class ExportJobs {
         if (this.state.jobId !== jobId || !this.state.active || resources.signal.aborted) return;
         beat(); update({ progress: Math.max(this.state.progress, Math.min(100, Math.max(0, progress))) });
       },
-      report: result => update({ phaseResults: [...this.state.phaseResults, result] }),
+      report: result => {
+        update({ phaseResults: [...this.state.phaseResults, result] });
+        if (result.phase === "rendering") context.event("rendered", { ...result });
+        if (result.phase === "muxing") context.event("muxed", { ...result });
+      },
     };
     let setupError: unknown;
     try {
@@ -214,9 +231,10 @@ export class ExportJobs {
       }
     } catch (error) { setupError = error; }
     this.publish({ jobId, phase: "preparing", active: true, progress: 0, logs: [],
-      error: null, result: null, phaseResults: [], cancellable: true, cleanupComplete: false });
+      error: null, result: null, phaseResults: [], cancellable: true, cleanupComplete: false, buildId: this.buildId, events: [] });
     armStage("preparing");
     context.addLog("EXPORT STARTED");
+    context.event("started");
     void (async () => {
       let result: ExportResult | null = null, error: string | null = null;
       try {
@@ -248,6 +266,8 @@ export class ExportJobs {
         this.running = null;
         this.resources = null;
         const cancelled = resources.signal.aborted && resources.signal.reason?.name === "AbortError";
+        if (error) context.event(cancelled ? "cancelled" : "failed", { message: error,
+          category: (resources.signal.reason as { category?: string })?.category ?? "processing", cleanupComplete });
         this.publish({ active: false, phase: error ? (cancelled && cleanupComplete ? "cancelled" : "failed") : "complete", error, result,
           progress: error ? this.state.progress : 100, cleanupComplete, cancellable: false });
         finish();

@@ -6,8 +6,10 @@ import { createReadStream } from 'node:fs';
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { inspectArtifacts, assertProductModules } from './scripts/artifact-policy.mjs';
+import { sourceIdentity } from './scripts/source-identity.mjs';
 
 export default defineConfig(({ command, mode }) => {
+  const buildId = `${sourceIdentity().sha256}:${command === 'build' ? 'production' : mode}`;
   const development = command === 'serve' && mode === 'development';
   const automation = command === 'serve' && mode === 'test';
   const journalId = '\0virtual:development-journal';
@@ -62,7 +64,7 @@ export default defineConfig(({ command, mode }) => {
       }],
     },
     publicDir: false,
-    define: { __DEV_AUTOMATION__: JSON.stringify(automation) },
+    define: { __DEV_AUTOMATION__: JSON.stringify(automation), __BUILD_ID__: JSON.stringify(buildId) },
     server: { headers: { 'Cross-Origin-Opener-Policy': 'same-origin' } },
     build: { chunkSizeWarningLimit: 4096, target: 'es2020' },
   };
