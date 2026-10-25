@@ -1,3 +1,4 @@
+import { outputProfile, frameSegments } from "./outputProfile";
 import { renderInWorker } from "./renderWorker";
 import { preflightAssets } from "./preflight";
 import { decodeAudioInWorker } from "./audioWorker";
@@ -85,57 +86,11 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
       `Export started: ${exportQuality}, ${totalDuration.toFixed(1)}s timeline, ${mediaAssets.length} clips + ${audioTracks.length} audio tracks`,
     );
     addLog("PASS 1/4: Initializing Parallel Visual Pipeline...");
-    const isDraft = exportQuality === "draft";
-    const baseRes = isDraft ? 480 : 720;
-
-    let targetWidth, targetHeight;
-    if (aspectRatio === "16:9") {
-      targetWidth = isDraft ? 854 : 1280;
-      targetHeight = baseRes;
-    } else if (aspectRatio === "9:16") {
-      targetWidth = baseRes;
-      targetHeight = isDraft ? 854 : 1280;
-    } else {
-      // 1:1
-      targetWidth = baseRes;
-      targetHeight = baseRes;
-    }
-    // --- T1: render at the sources' frame rate (no duplicated frames) ---
-    // Original bytes are read through the source store; job leases keep
-    // them alive for the whole export, so no URL fetch is needed here.
-    let maxSourceFps = 0;
-    for (const asset of mediaAssets) {
-      if (asset.type !== "video") continue;
-      let f = asset.sourceFps || 0;
-      if (!f) {
-        // Legacy drafts predate sourceFps — probe cheaply from packet timestamps.
-        try {
-          const input = new Input({
-            source: new BlobSource(await getBlob(asset.sourceId)),
-            formats: ALL_FORMATS,
-          });
-          const releaseInput = resources.own(() => input.dispose());
-          try {
-            const vt = await resources.wait(input.getPrimaryVideoTrack(), releaseInput);
-            if (!vt) throw new Error("Missing video track");
-            f = (await resources.wait(vt.computeFrameRateMetrics({ targetPacketCount: 128 }), releaseInput))
-              .bestGuessFrameRate;
-          } finally {
-            await releaseInput();
-          }
-        } catch {
-          resources.signal.throwIfAborted();
-          /* keep 0 */
-        }
-      }
-      maxSourceFps = Math.max(maxSourceFps, f);
-    }
-    const fps = exportFrameRate(maxSourceFps);
+    const profile = outputProfile(exportQuality, aspectRatio, totalDuration, inventory);
+    report({ phase: "preparing", profile });
+    const { width: targetWidth, height: targetHeight, fps, videoBitrate, audioBitrate } = profile;
     const frameDuration = 1 / fps;
-    const { videoBitrate, audioBitrate } = estimateExport(
-      exportQuality,
-      totalDuration,
-    );
+    profile.conversions.forEach(addLog);
     // Pre-flight: fail fast with a clear message if this device has no AVC encoder
     // (same capability-gap class as the AAC encoder — verify codec availability before export).
     if (
@@ -219,13 +174,14 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
       header.setUint32(40, frames * 4, true);
       return mixed;
     };
-    const renderSegment = (start: number, end: number, index: number) =>
-      renderInWorker(snapshot, { targetWidth, targetHeight, videoBitrate, fps, frameDuration, fitMode }, start, end, index,
+    const segments = frameSegments(profile);
+    const renderSegment = (segment: typeof segments[number]) =>
+      renderInWorker(snapshot, { targetWidth, targetHeight, videoBitrate, fps, frameDuration, fitMode,
+        frameStart: segment.frameStart, frameEnd: segment.frameEnd }, segment.start, segment.end, segment.index,
         { ...context, setExportProgress: progress => {
-          segmentProgress.current[index] = progress;
+          segmentProgress.current[segment.index] = progress;
           setExportProgress(segmentProgress.current[0] + segmentProgress.current[1]);
         } });
-    const mid = Math.round((totalDuration / 2) * fps) / fps;
     const cancellation = resources;
     const run = async (work: () => Promise<Uint8Array>) => {
       try {
@@ -237,8 +193,8 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
     };
     // A failed branch cancels its siblings; settle their cleanup before a retry.
     const results = await Promise.allSettled([
-      run(() => renderSegment(0, mid, 0)),
-      run(() => renderSegment(mid, totalDuration, 1)),
+      run(() => renderSegment(segments[0])),
+      run(() => renderSegment(segments[1])),
       run(() => mixAudio(cancellation.signal, resources, addLog)),
     ]);
     const [chunk1, chunk2, audioData] = results.map((result) => {

@@ -117,6 +117,7 @@ test("mixed PCM ends at clip trim", async ({ context }, info) => {
       const clipBlob = new Blob([bytes], { type: clip.mimeType });
       const scope = {
         ...media,
+        settings: {},
         mediaAssets: [clip],
         audioTracks: [],
         totalDuration: 1,
@@ -258,6 +259,7 @@ test("contain margins clear after a landscape-to-portrait cut", async ({
       )(window.testRuntime.timeline.createOpacitySampler, clips);
       const scope = {
         ...m,
+        settings: {},
         mediaAssets: clips,
         targetWidth: 160,
         targetHeight: 90,
@@ -341,6 +343,7 @@ test("parallel segment canvases render black before, between and after clips", a
       )(window.testRuntime.timeline.createOpacitySampler, clips);
       const scope = {
         ...m,
+        settings: {},
         mediaAssets: clips,
         targetWidth: 160,
         targetHeight: 90,

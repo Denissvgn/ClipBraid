@@ -12,6 +12,10 @@ def png(name, width, height, rgb):
 png('landscape-red.png', 160, 90, (255, 0, 0))
 png('portrait-blue.png', 90, 160, (0, 0, 255))
 ff('-f', 'lavfi', '-i', 'color=c=green:s=160x90:r=24:d=1', '-c:v', 'libx264', '-threads', '1', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart', str(root / 'silent-video.mp4'))
+for tag, rate in [('23976', '24000/1001'), ('24', '24'), ('2997', '30000/1001'), ('30', '30'), ('60', '60')]:
+    ff('-f', 'lavfi', '-i', f'color=c=blue:s=160x90:r={rate}:d=1', '-c:v', 'libx264', '-threads', '1', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart', str(root / f'rate-{tag}.mp4'))
+for name, args in [('sar-wide.mp4', ['-vf', 'setsar=2']), ('vfr.mp4', ['-vf', "select='if(lt(t,0.5),not(mod(n,2)),not(mod(n,3)))'", '-fps_mode', 'vfr'])]:
+    ff('-f', 'lavfi', '-i', 'smptebars=size=160x90:rate=60:duration=1', *args, '-c:v', 'libx264', '-threads', '1', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart', str(root / name))
 ff('-f', 'lavfi', '-i', 'color=c=red:s=1600x900:r=30:d=0.5', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=0.5', '-c:v', 'libx264', '-threads', '1', '-preset', 'ultrafast', '-crf', '25', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k', '-shortest', '-movflags', '+faststart', str(root / 'oversized-av.mp4'))
 ff('-f', 'lavfi', '-i', 'smptebars=size=160x90:rate=30000/1001:duration=1.001', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=1.001', '-c:v', 'libx264', '-threads', '1', '-preset', 'ultrafast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k', '-shortest', '-movflags', '+faststart', str(root / 'bars-fractional-av.mp4'))
 ff('-display_rotation:v:0', '270', '-i', str(root / 'bars-fractional-av.mp4'), '-c', 'copy', str(root / 'rotated-av.mp4'))

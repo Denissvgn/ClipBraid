@@ -1466,6 +1466,7 @@ export default function App() {
                 </section>
                 <section className="inspector-section">
                   <h3>Export quality</h3>
+                  <p className="helper-text">Draft: 480p. Standard/High: 720p. Export uses up to 30 fps, square pixels and SDR color; framing and frame-rate conversion may change the source appearance.</p>
                   <div className="segmented">
                     {(["draft", "standard", "high"] as ExportQuality[]).map(
                       (quality) => (

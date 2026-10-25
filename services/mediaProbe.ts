@@ -7,7 +7,7 @@ registerAc3Decoder();
 export interface AssetInventory {
   id: string; sourceId: string; name: string; kind: "image" | "video" | "audio";
   mimeType: string; byteLength: number; duration: number | null;
-  video?: { width: number; height: number; rotation: number; codec: string; fps: number; firstTimestamp: number; endTimestamp: number; pixelAspectRatio: { num: number; den: number } };
+  video?: { width: number; height: number; rotation: number; codec: string; fps: number; firstTimestamp: number; endTimestamp: number; pixelAspectRatio: { num: number; den: number }; variableFrameRate?: boolean; colorSpace?: VideoColorSpaceInit };
   audio?: { codec: string; decodable: boolean; firstTimestamp: number; endTimestamp: number };
 }
 export async function probeAsset(asset: MediaAsset | AudioFragment, blob: Blob): Promise<AssetInventory> {
@@ -31,7 +31,9 @@ export async function probeAsset(asset: MediaAsset | AudioFragment, blob: Blob):
     if (kind === "video") {
       const clip = asset as MediaAsset, track = await input.getPrimaryVideoTrack();
       if (!track || !(await track.canDecode())) throw new Error("Missing or unsupported video track.");
-      const fps = (await track.computeFrameRateMetrics({ targetPacketCount: 128 })).bestGuessFrameRate;
+      const metrics = await track.computeFrameRateMetrics({ targetPacketCount: 256 }), fps = metrics.bestGuessFrameRate;
+      if (await track.hasHighDynamicRange()) throw new Error("Wide-gamut/HDR video requires conversion to SDR before import.");
+      const colorSpace = await track.getColorSpace();
       const firstTimestamp = await track.getFirstTimestamp(), endTimestamp = await track.computeDuration();
       const window = sourceWindow(clip), end = Math.min(window.end, window.start + clip.duration);
       const tolerance = 1 / (fps > 0 ? fps : 30) + 1e-6;
@@ -43,7 +45,8 @@ export async function probeAsset(asset: MediaAsset | AudioFragment, blob: Blob):
         if (!sample) throw new Error(`No decoded video frame at ${time.toFixed(3)}s.`);
         try {
           result.video = { width: sample.displayWidth, height: sample.displayHeight, rotation: sample.rotation,
-            codec: String(await track.getCodec()), fps, firstTimestamp, endTimestamp,
+            codec: String(await track.getCodec()), fps, firstTimestamp, endTimestamp, colorSpace,
+            variableFrameRate: !metrics.frameRateIsConstant,
             pixelAspectRatio: sample.pixelAspectRatio ?? { num: 1, den: 1 } };
         } finally { sample.close(); }
       }

@@ -1,7 +1,7 @@
 import type { MediaAsset, VisualFilter } from "../types";
 import { activeIntervals, canvasFit, createOpacitySampler, frameCount, frameTimestamp, intervalsOverlap, sourceTimeAt } from "./timeline";
 import { Input, Output, Mp4OutputFormat, BufferTarget, BlobSource, ALL_FORMATS, VideoSampleSource, VideoSample, VideoSampleSink } from "mediabunny";
-export interface RenderSettings { targetWidth: number; targetHeight: number; videoBitrate: number; fps: number; frameDuration: number; fitMode: "contain" | "cover" }
+export interface RenderSettings { targetWidth: number; targetHeight: number; videoBitrate: number; fps: number; frameDuration: number; fitMode: "contain" | "cover"; frameStart?: number; frameEnd?: number }
 const applyCanvasFilter = (
   ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D,
   filter: VisualFilter,
@@ -57,7 +57,7 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
   });
   output.addVideoTrack(videoSource, { frameRate: fps });
   const canvas = new OffscreenCanvas(targetWidth, targetHeight);
-  const ctx = canvas.getContext("2d", { alpha: false })!;
+  const ctx = canvas.getContext("2d", { alpha: false, colorSpace: "srgb" })!;
   const sinks = new Map<string, VideoSampleSink>();
   const images = new Map<string, ImageBitmap>();
   const inputs: Input[] = [];
@@ -91,11 +91,11 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
       }
     }
     await output.start();
-    const totalFrames = frameCount(segmentDuration, fps);
+    const totalFrames = settings.frameStart === undefined ? frameCount(segmentDuration, fps) : settings.frameEnd! - settings.frameStart;
     const segmentStarted = performance.now();
     for (let i = 0; i < totalFrames; i++) {
       signal?.throwIfAborted();
-      const t = frameTimestamp(i, fps, start);
+      const t = settings.frameStart === undefined ? frameTimestamp(i, fps, start) : frameTimestamp(settings.frameStart + i, fps);
       const outTs = frameTimestamp(i, fps);
       const visible = activeIntervals(relevantAssets, t);
       const decoded = new Map<string, VideoSample>();

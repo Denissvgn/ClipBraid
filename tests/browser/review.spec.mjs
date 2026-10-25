@@ -345,6 +345,7 @@ test("preview and encoded crossfades preserve brightness throughout the overlap"
       const opacityAt = timeline.createOpacitySampler(clips);
       const scope = {
         ...m,
+        settings: {},
         mediaAssets: clips,
         targetWidth: 160,
         targetHeight: 90,
@@ -435,6 +436,7 @@ test("trimmed buffers exclude both boundaries and standalone tracks end at their
       }
       const scope = {
         ...media,
+        settings: {},
         Input,
         AudioBufferSink: Sink,
         mediaAssets: [
