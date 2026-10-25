@@ -1,4 +1,5 @@
 import { renderInWorker } from "./renderWorker";
+import { preflightAssets } from "./preflight";
 import { decodeAudioInWorker } from "./audioWorker";
 import { ExportResources } from "./exportJob";
 import { clipHasSound, mixPolicy, trackGain } from "./mixing";
@@ -75,6 +76,8 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
   const resources = context.resources;
   const releaseFFmpeg = resources.own(() => ffmpegService.terminate());
   try {
+    const inventory = await preflightAssets(snapshot, context);
+    report({ phase: "preparing", assets: inventory });
     await resources.wait(ffmpegService.load(addLog), releaseFFmpeg);
     await initMediaCodecs();
     sysLog(

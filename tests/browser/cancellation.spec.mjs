@@ -42,8 +42,8 @@ async function faultEditor(page) {
   await page.route("**/services/*.worker.ts*", async route => {
     const response = await route.fetch();
     let body = await response.text();
-    if (fault === "decode") body += "\nVideoDecoder.prototype.decode = function() {}; VideoDecoder.prototype.flush = function() { return new Promise(() => {}); };\n";
-    if (fault === "encode") body += "\nVideoEncoder.prototype.flush = function() { return new Promise(() => {}); };\n";
+    if (fault === "decode" && route.request().url().includes("render.worker")) body += "\nVideoDecoder.prototype.decode = function() {}; VideoDecoder.prototype.flush = function() { return new Promise(() => {}); };\n";
+    if (fault === "encode" && route.request().url().includes("render.worker")) body += "\nVideoEncoder.prototype.flush = function() { return new Promise(() => {}); };\n";
     if (fault === "mix" && route.request().url().includes("audio.worker"))
       body += "\nAudioDecoder.prototype.decode = function() {}; AudioDecoder.prototype.flush = function() { return new Promise(() => {}); };\n";
     await route.fulfill({ response, body });

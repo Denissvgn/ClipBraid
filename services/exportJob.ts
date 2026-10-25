@@ -1,6 +1,7 @@
 import type { MediaAsset, AudioFragment } from "../types";
 import type { MediaSourceStore, SourceLease } from "./mediaSources";
 import type { ExportQuality } from "./timeline";
+import type { AssetInventory } from "./mediaProbe";
 
 export interface ExportSnapshot {
   mediaAssets: MediaAsset[];
@@ -12,6 +13,7 @@ export interface ExportSnapshot {
 }
 export type ExportPhase = "idle" | "preparing" | "rendering" | "muxing" | "saving" | "cancelling" | "cleaning" | "cancelled" | "complete" | "failed";
 export type ExportPhaseResult =
+  | { phase: "preparing"; assets: AssetInventory[] }
   | { phase: "rendering"; segments: number[]; audioBytes: number }
   | { phase: "muxing"; videoBytes: number }
   | { phase: "saving"; accepted: true };
