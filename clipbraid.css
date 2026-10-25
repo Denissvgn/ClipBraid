@@ -6,6 +6,8 @@
   background: var(--color-paper);
   color: var(--color-ink);
   font-family: var(--font-body);
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
 .editor-app *,
 dialog * {
@@ -227,6 +229,7 @@ button[aria-busy="true"] {
 }
 .preview-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-md);
   min-width: 0;
@@ -242,10 +245,12 @@ button[aria-busy="true"] {
 }
 .ratio-controls {
   margin-left: auto;
+  max-width: 100%;
   flex-shrink: 0;
 }
 .segmented {
   display: flex;
+  flex-wrap: wrap;
   padding: 3px;
   border: var(--rule-width) solid var(--color-rule);
   border-radius: var(--radius-sm);
@@ -253,7 +258,8 @@ button[aria-busy="true"] {
   gap: 2px;
 }
 .segmented button {
-  flex: 1;
+  flex: 1 1 auto;
+  white-space: normal;
   min-height: 32px;
   padding: 4px 8px;
   border: 0;
@@ -813,12 +819,13 @@ input[type="range"]::-moz-range-thumb {
   background: var(--color-preview);
   color: var(--color-preview-ink);
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   padding: var(--space-xl);
   overflow: auto;
 }
 .export-message {
+  margin: auto;
   width: min(100%, 460px);
   display: grid;
   justify-items: center;
@@ -829,6 +836,7 @@ input[type="range"]::-moz-range-thumb {
   font-size: var(--text-xl);
 }
 .export-message > p {
+  overflow-wrap: anywhere;
   font-size: var(--text-sm);
   line-height: 1.6;
   margin: 0;
