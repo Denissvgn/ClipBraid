@@ -6,6 +6,27 @@ export interface AudioSelection {
   timelineEnd: number;
 }
 
+/** One native-rate grain per track/batch avoids decoder-chunk boundary sums. */
+export function combineAudioChunks(chunks: { timestamp: number; buffer: AudioBuffer }[]) {
+  if (!chunks.length) return null;
+  const ordered = [...chunks].sort((a, b) => a.timestamp - b.timestamp);
+  const first = ordered[0], rate = first.buffer.sampleRate, channels = first.buffer.numberOfChannels;
+  const positions = ordered.map(chunk => {
+    if (chunk.buffer.sampleRate !== rate || chunk.buffer.numberOfChannels !== channels)
+      throw new Error("Audio format changes inside a selected range; convert this source before exporting.");
+    return Math.round((chunk.timestamp - first.timestamp) * rate);
+  });
+  const length = Math.max(...ordered.map((chunk, index) => positions[index] + chunk.buffer.length));
+  if (!Number.isSafeInteger(length) || length <= 0 || length > rate * 10)
+    throw new Error("Decoded audio range exceeds the bounded mixing window.");
+  const buffer = new AudioBuffer({ length, sampleRate: rate, numberOfChannels: channels });
+  ordered.forEach((chunk, index) => {
+    for (let channel = 0; channel < channels; channel++)
+      buffer.copyToChannel(chunk.buffer.getChannelData(channel), channel, positions[index]);
+  });
+  return { timestamp: first.timestamp, buffer };
+}
+
 /** Select sample timestamps inside the intersection, before any resampling. */
 export function audioChunkWindow(
   timestamp: number,
@@ -50,6 +71,7 @@ export function scheduleAudioChunk(
   buffer: AudioBuffer,
   timestamp: number,
   selection: AudioSelection,
+  options: { gain?: number; destination?: AudioNode; onNode?: (node: AudioNode) => void } = {},
 ): AudioBufferSourceNode | undefined {
   const window = audioChunkWindow(
     timestamp,
@@ -80,8 +102,19 @@ export function scheduleAudioChunk(
     }
   }
   const source = context.createBufferSource();
+  options.onNode?.(source);
   source.buffer = selected;
-  source.connect(context.destination);
-  source.start(window.when, (window.first - retained.first) / buffer.sampleRate, window.duration);
+  if (options.gain !== undefined && options.gain !== 1) {
+    const gain = context.createGain();
+    options.onNode?.(gain); gain.gain.value = options.gain;
+    source.connect(gain); gain.connect(options.destination ?? context.destination);
+  } else source.connect(options.destination ?? context.destination);
+  const firstOutput = Math.ceil(window.when * context.sampleRate - 1e-6);
+  const lastOutput = Math.ceil((window.when + window.duration) * context.sampleRate - 1e-6);
+  if (lastOutput <= firstOutput) { source.disconnect(); return; }
+  const when = firstOutput / context.sampleRate;
+  const offset = Math.max(0, (window.first - retained.first) / buffer.sampleRate + when - window.when);
+  source.start(when, offset,
+    (lastOutput - firstOutput) / context.sampleRate);
   return source;
 }

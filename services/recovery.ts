@@ -5,7 +5,7 @@ const MAX_BYTES = 128 * 1024 * 1024;
 interface Reference { sourceId: string; key: string; sha256: string; mimeType: string; byteLength: number }
 export interface RecoveryUI { exportQuality: "draft" | "standard" | "high"; zoom: number; showSafeZones: boolean; isTheaterMode: boolean }
 export interface LocalRevision {
-  revision: number; formatVersion: 1; savedAt: number; snapshot: ProjectSnapshot;
+  revision: number; formatVersion: 1 | 2; savedAt: number; snapshot: ProjectSnapshot;
   references: Reference[]; ui: RecoveryUI;
 }
 interface StoredAsset { key: string; bytes: Blob; sha256: string; mimeType: string; byteLength: number }
@@ -115,7 +115,7 @@ export class RecoveryStore {
     });
     if (generation !== this.generation) throw new DOMException("Storage closed", "AbortError");
     if (!data) { this.expectedRevision = 0; return null; }
-    if (data.record.formatVersion !== 1 || !Number.isSafeInteger(data.record.revision) || data.record.revision < 1 ||
+    if (![1, 2].includes(data.record.formatVersion) || !Number.isSafeInteger(data.record.revision) || data.record.revision < 1 ||
       !Number.isSafeInteger(data.record.savedAt) || data.record.savedAt < 0)
       throw new Error("This local draft version is unsupported.");
     data.record.snapshot = validateProjectMetadata(data.record.snapshot);
@@ -166,7 +166,7 @@ export class RecoveryStore {
         const revision = expected + 1;
         for (const [key, source] of unique) assets.put({ key, bytes: source.bytes, sha256: source.sha256,
           mimeType: source.mimeType, byteLength: source.byteLength });
-        revisions.put({ revision, formatVersion: 1, savedAt: Date.now(), snapshot: clean, references, ui: settings });
+        revisions.put({ revision, formatVersion: 2, savedAt: Date.now(), snapshot: clean, references, ui: settings });
         meta.put({ key: "head", revision });
         const all = revisions.getAll();
         all.onsuccess = this.guarded(tx, () => {

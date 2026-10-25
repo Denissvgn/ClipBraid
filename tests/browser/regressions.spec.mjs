@@ -126,6 +126,7 @@ test("mixed PCM ends at clip trim", async ({ context }, info) => {
       Object.assign(scope, window.testRuntime.timeline);
       Object.assign(scope, window.testRuntime.audio);
       Object.assign(scope, window.testRuntime.lifecycle);
+      Object.assign(scope, window.testRuntime.mixing);
       const fn = new Function(...Object.keys(scope), mix)(
         ...Object.values(scope),
       );

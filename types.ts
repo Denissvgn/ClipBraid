@@ -18,6 +18,7 @@ export interface MediaAsset {
   transitionDuration?: number; // Duration of the crossfade with the PREVIOUS clip
   hasAudio: boolean; // Detected audio stream presence
   muted?: boolean; // User-controlled mute state for original clip audio
+  gain?: number; // Linear original-audio volume, 0–1; omitted legacy value is unity
   sourceFps?: number; // Detected source frame rate; retained within the 12–30 fps export range
   sourceWidth?: number; // Native coded width of the retained source
   sourceHeight?: number; // Native coded height of the retained source
@@ -32,4 +33,5 @@ export interface AudioFragment {
   name: string;
   startTime: number; // position on timeline in seconds
   duration: number; // in seconds
+  gain?: number; // Linear track volume, 0–1; zero is intentional silence
 }

@@ -1,7 +1,7 @@
 import type { MediaAsset, AudioFragment, VisualFilter } from "../types";
 
 /** Current on-disk schema. Format identity is the schema, not the display name. */
-export const PROJECT_SCHEMA_VERSION = 1;
+export const PROJECT_SCHEMA_VERSION = 2;
 /** Maximum accepted project document size in bytes (256 MiB). */
 export const MAX_PROJECT_BYTES = 256 * 1024 * 1024;
 /** Maximum accepted decoded media payload size in bytes (256 MiB). */
@@ -83,7 +83,8 @@ function optionalNumber(
 }
 
 // Unversioned documents are the original RED VOX draft format; version 1 uses
-// the same field names. Migration stamps the version and rebuilds missing or
+// the same fields without configured gains. Version 2 adds optional gains.
+// Migration stamps the version and rebuilds missing or
 // empty media references from the entry ID (legacy drafts could persist an
 // empty reference; the payload itself is authoritative). Source media, trims,
 // transitions, audio offsets, canvas options and the playhead are preserved.
@@ -94,10 +95,11 @@ export function migrateProjectDocument(
   const data = record(value);
   const version = data.schemaVersion;
   if (version === PROJECT_SCHEMA_VERSION) return data;
+  if (version === 1) return { ...data, schemaVersion: PROJECT_SCHEMA_VERSION };
   if (version !== undefined)
     throw new Error(
       `Unsupported project version ${JSON.stringify(version) ?? "unknown"}; ` +
-        `this build reads unversioned drafts and version ${PROJECT_SCHEMA_VERSION}. The file was not modified.`,
+        `this build reads unversioned drafts and versions 1–${PROJECT_SCHEMA_VERSION}. The file was not modified.`,
     );
   const migrated: Record<string, unknown> = {
     ...data,
@@ -178,6 +180,7 @@ function validateMetadata(data: Record<string, unknown>, resolveSource: (item: R
       mimeType: text(item.mimeType, "media type"),
       startTime: number(item.startTime, "start time"),
       duration: number(item.duration, "duration", Number.MIN_VALUE),
+      ...(item.gain === undefined ? {} : { gain: number(item.gain, "track volume", 0, 1) }),
     };
   }
   const mediaAssets: MediaAsset[] = media.map((value) => {
@@ -269,7 +272,7 @@ export interface ProjectSnapshot {
  * Deterministic project serialization. Base64 media payloads are produced
  * here — the required transport boundary — from the immutable source bytes;
  * runtime state itself holds only Blob handles and source IDs. The emitted
- * field set is the version 1 format and stays identical across round trips.
+ * field set is the version 2 format and stays identical across round trips.
  */
 export async function serializeProject(
   state: ProjectSnapshot,
@@ -298,6 +301,7 @@ export async function serializeProject(
       sourceFps: clip.sourceFps,
       sourceWidth: clip.sourceWidth,
       sourceHeight: clip.sourceHeight,
+      ...(clip.gain === undefined ? {} : { gain: clip.gain }),
     });
   }
   const audioTracks = [];
@@ -310,6 +314,7 @@ export async function serializeProject(
       name: track.name,
       startTime: track.startTime,
       duration: track.duration,
+      ...(track.gain === undefined ? {} : { gain: track.gain }),
     });
   }
   const json = JSON.stringify({

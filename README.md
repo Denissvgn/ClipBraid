@@ -32,6 +32,9 @@ be retried in the editor.
    to adjust its sound, trim, order and look.
 4. **Save project** keeps an editable JSON draft. **Export video** prepares an MP4.
 
+Track volumes share the same overlap headroom in preview and export. New project
+files use format version 2; unversioned and version 1 drafts remain readable.
+
 This is an experimental editor. Picture/sound fidelity and recovery issues remain,
 and long exports can stall. File sizes are bitrate-based estimates; browser/device support
 varies. Keep original files and save drafts regularly; autosave and undo are not

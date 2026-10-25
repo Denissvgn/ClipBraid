@@ -56,7 +56,7 @@ test("an oversized draft is rejected before parsing and keeps the open project",
   }
 });
 
-test("an unversioned legacy draft loads and re-saves as schema version 1", async ({
+test("an unversioned legacy draft loads and re-saves as schema version 2", async ({
   page,
 }) => {
   await openEditor(page);
@@ -92,7 +92,7 @@ test("an unversioned legacy draft loads and re-saves as schema version 1", async
   };
   await loadDraft(page, legacy);
   const saved = await saveDraft(page);
-  expect(saved.schemaVersion).toBe(1);
+  expect(saved.schemaVersion).toBe(2);
   expect(saved.currentTime).toBe(0.5);
   expect(saved.fitMode).toBe("cover");
   expect(saved.transitionDuration).toBe(0.25);

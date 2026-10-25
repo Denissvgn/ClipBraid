@@ -1,6 +1,7 @@
-import React, { useEffect, useRef, memo } from "react";
+import React, { useEffect, useRef, useMemo, memo } from "react";
 import { AudioFragment, MediaAsset } from "../types";
 import { isIntervalActive, sourceTimeAt } from "../services/timeline";
+import { clipHasSound, mixPolicy, trackGain } from "../services/mixing";
 interface AudioEngineProps {
   audioTracks: AudioFragment[];
   mediaAssets: MediaAsset[];
@@ -25,12 +26,13 @@ export const AudioEngine = memo(
     isPlaying = false,
   }: AudioEngineProps) => {
     const audioRefs = useRef<Map<string, HTMLAudioElement>>(new Map());
+    const policy = useMemo(() => mixPolicy(mediaAssets, audioTracks), [mediaAssets, audioTracks]);
     useEffect(() => {
       // Collect IDs for current audio requirements
       const currentIds = new Set([
-        ...audioTracks.map((t) => t.id),
+        ...audioTracks.filter(track => trackGain(track) > 0).map((t) => t.id),
         ...mediaAssets
-          .filter((a) => a.type === "video" && a.hasAudio && !a.muted)
+          .filter(clipHasSound)
           .map((a) => a.id),
       ]);
 
@@ -49,6 +51,7 @@ export const AudioEngine = memo(
       }
       // Load soundrack audio
       for (const track of audioTracks) {
+        if (trackGain(track) === 0) continue;
         const url = desiredUrls.get(track.id);
         if (url && !audioRefs.current.has(track.id)) {
           const audio = new Audio(url);
@@ -59,7 +62,7 @@ export const AudioEngine = memo(
       }
       // Load video clip audio
       for (const asset of mediaAssets) {
-        if (asset.type === "video" && asset.hasAudio && !asset.muted) {
+        if (clipHasSound(asset)) {
           const url = desiredUrls.get(asset.id);
           if (url && !audioRefs.current.has(asset.id)) {
             const audio = new Audio(url);
@@ -82,6 +85,7 @@ export const AudioEngine = memo(
       audioTracks.forEach((track) => {
         const audio = audioRefs.current.get(track.id);
         if (!audio) return;
+        audio.volume = trackGain(track) * policy.gain;
         const isWithinRange = isIntervalActive(track, currentTime);
         if (isPlaying && isWithinRange) {
           const targetTime = currentTime - track.startTime;
@@ -102,9 +106,10 @@ export const AudioEngine = memo(
       });
       // Sync video clip audio
       mediaAssets.forEach((asset) => {
-        if (asset.type !== "video" || !asset.hasAudio || asset.muted) return;
+        if (!clipHasSound(asset)) return;
         const audio = audioRefs.current.get(asset.id);
         if (!audio) return;
+        audio.volume = trackGain(asset) * policy.gain;
         const isWithinRange = isIntervalActive(asset, currentTime);
         const targetTime = sourceTimeAt(asset, currentTime);
         if (isPlaying && isWithinRange) {
@@ -121,7 +126,7 @@ export const AudioEngine = memo(
           }
         }
       });
-    }, [isPlaying, currentTime, audioTracks, mediaAssets, sourceUrl]);
+    }, [isPlaying, currentTime, audioTracks, mediaAssets, sourceUrl, policy.gain]);
     return null;
   },
 );

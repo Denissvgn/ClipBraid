@@ -20,7 +20,7 @@ const legacyText = readFileSync(
   "utf8",
 );
 const golden = JSON.parse(
-  readFileSync("tests/fixtures/drafts/legacy-unversioned.migrated.json", "utf8"),
+  readFileSync("tests/fixtures/drafts/legacy-unversioned.v2.json", "utf8"),
 );
 
 function clip(overrides = {}) {
@@ -75,9 +75,10 @@ test("legacy migration matches the golden file without mutating the input", () =
   );
 });
 
-test("version 1 passes through; unsupported versions are rejected unmodified", () => {
+test("current version passes through, version 1 migrates, and unsupported versions are rejected", () => {
   assert.deepEqual(migrateProjectDocument(golden), golden);
-  for (const schemaVersion of [2, 9999, 0, -1, 1.5, "1", null, true])
+  assert.deepEqual(migrateProjectDocument({ ...golden, schemaVersion: 1 }), golden);
+  for (const schemaVersion of [3, 9999, 0, -1, 1.5, "1", null, true])
     assert.throws(
       () => migrateProjectDocument({ schemaVersion }),
       /Unsupported project version.*not modified/,

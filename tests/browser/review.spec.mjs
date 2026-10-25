@@ -458,6 +458,7 @@ test("trimmed buffers exclude both boundaries and standalone tracks end at their
       Object.assign(scope, window.testRuntime.timeline);
       Object.assign(scope, window.testRuntime.audio);
       Object.assign(scope, window.testRuntime.lifecycle);
+      Object.assign(scope, window.testRuntime.mixing);
       const invoke = () =>
         new Function(...Object.keys(scope), mix)(...Object.values(scope))();
       const decode = async (bytes) =>

@@ -22,7 +22,7 @@ test("real decoded PCM excludes impulses on both resampled trim edges", async ({
         sourceId: "tone", originalDuration: 1, trimStart: start,
         trimEnd: 1 - end, duration, startTime: 0.037 };
       const scope = {
-        ...media, ...timeline, ...audio, ...window.testRuntime.lifecycle,
+        ...media, ...timeline, ...audio, ...window.testRuntime.lifecycle, ...window.testRuntime.mixing,
         mediaAssets: standalone ? [] : [clip],
         audioTracks: standalone ? [clip] : [], totalDuration: 0.3,
         getBlob: async () => blob,
@@ -61,7 +61,7 @@ test("real decoded sample windows preserve stereo, timestamp gaps and exact time
               yield { ...chunk, timestamp: chunk.timestamp + shift };
           }
         }
-        const scope = { ...media, ...timeline, ...audio, ...window.testRuntime.lifecycle, decodeAudioInWorker: async (blob, start, end, resources, ...args) =>
+        const scope = { ...media, ...timeline, ...audio, ...window.testRuntime.lifecycle, ...window.testRuntime.mixing, decodeAudioInWorker: async (blob, start, end, resources, ...args) =>
             (await window.testRuntime.lifecycle.decodeAudioInWorker(blob, start - shift, end - shift, resources, ...args))
               .map(chunk => ({ ...chunk, timestamp: chunk.timestamp + shift })),
           mediaAssets: [{ name: "stereo", type: "video", hasAudio: true,
@@ -157,7 +157,7 @@ test("audio rendering stays in bounded native batches and drains a cancelled bat
       });
       return native;
     };
-    const scope = { ...media, ...timeline, ...audio, ...lifecycle, mediaAssets: [],
+    const scope = { ...media, ...timeline, ...audio, ...lifecycle, ...window.testRuntime.mixing, mediaAssets: [],
       audioTracks: [{ sourceId: "tone", name: "tone", startTime: 0, duration: 5 }],
       totalDuration: 5, getBlob: async () => blob, audioBufferToWav: encode };
     const fn = new Function(...Object.keys(scope), mix)(...Object.values(scope));

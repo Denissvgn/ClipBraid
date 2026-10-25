@@ -21,6 +21,7 @@ import { ProxyQueue } from "./services/proxyQueue";
 import { renderProxy } from "./services/proxyRenderer";
 import { useProjectRecovery } from "./components/useProjectRecovery";
 import type { RecoveryData } from "./services/recovery";
+import { mixPolicy, trackGain } from "./services/mixing";
 import {
   activeIntervals,
   clampPlayhead,
@@ -282,6 +283,7 @@ export default function App() {
     () => estimateExport(exportQuality, totalDuration),
     [exportQuality, totalDuration],
   );
+  const soundPolicy = useMemo(() => mixPolicy(mediaAssets, audioTracks), [mediaAssets, audioTracks]);
   const seekTo = useCallback(
     (t: number) => {
       const clamped = clampPlayhead(t, totalDuration);
@@ -1247,6 +1249,12 @@ export default function App() {
                 {selectedAsset.type === "video" && (
                   <>
                     <div className="inspector-section">
+                      <label htmlFor="clip-volume">Original clip volume<span>{Math.round(trackGain(selectedAsset) * 100)}%</span></label>
+                      <input id="clip-volume" type="range" min="0" max="100" step="1"
+                        value={trackGain(selectedAsset) * 100}
+                        onChange={event => updateSelectedAsset({ gain: Number(event.target.value) / 100 })} />
+                    </div>
+                    <div className="inspector-section">
                       <label htmlFor="trim-start">
                         Trim from start
                         <span>{selectedAsset.trimStart.toFixed(2)}s</span>
@@ -1375,6 +1383,7 @@ export default function App() {
                 </div>
                 <section className="inspector-section">
                   <h3>Your soundtrack</h3>
+                  {soundPolicy.maxOverlap > 0 && <p className="helper-text">Mix level: {Math.round(soundPolicy.gain * 100)}%. Headroom reserves space for up to {soundPolicy.maxOverlap} enabled sounds at once.</p>}
                   <p className="helper-text">
                     Layer music, narration and other audio. Each file gets its
                     own track.
@@ -1395,6 +1404,18 @@ export default function App() {
                     Choose audio from gallery
                     <Icon name="right" size={14} />
                   </button>
+                  {audioTracks.map((track, index) => (
+                    <label className="track-volume" key={track.id}>
+                      <span>{track.name} · {Math.round(trackGain(track) * 100)}%</span>
+                      <input type="range" min="0" max="100" step="1"
+                        aria-label={`Volume for audio ${index + 1}: ${track.name}`}
+                        value={trackGain(track) * 100}
+                        onChange={event => {
+                          const gain = Number(event.target.value) / 100;
+                          setAudioTracks(previous => previous.map(value => value.id === track.id ? { ...value, gain } : value));
+                        }} />
+                    </label>
+                  ))}
                 </section>
                 <section className="inspector-section">
                   <div className="switch-row">

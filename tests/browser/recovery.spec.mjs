@@ -96,6 +96,17 @@ test("schema upgrade abort rolls back and concurrent writers cannot overwrite a 
     const snapshot = { mediaAssets: [], audioTracks: [], aspectRatio: "16:9", fitMode: "contain", transitionDuration: 0.5, currentTime: 0 };
     const ui = { exportQuality: "draft", zoom: 40, showSafeZones: false, isTheaterMode: false };
     await first.latest(); await first.commit(snapshot, [], ui); first.close();
+    // Preserve a real format-1 record while exercising the storage schema upgrade.
+    await new Promise((resolve, reject) => {
+      const open = indexedDB.open(name, 1);
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const db = open.result, tx = db.transaction("revisions", "readwrite"), store = tx.objectStore("revisions"), read = store.get(1);
+        read.onsuccess = () => store.put({ ...read.result, formatVersion: 1 });
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onabort = () => { db.close(); reject(tx.error); };
+      };
+    });
     const create = IDBObjectStore.prototype.createIndex;
     IDBObjectStore.prototype.createIndex = function () { throw new Error("injected schema migration fault"); };
     const upgrading = new RecoveryStore(name, 2);
@@ -110,10 +121,12 @@ test("schema upgrade abort rolls back and concurrent writers cannot overwrite a 
     let conflict;
     try { await b.commit({ ...snapshot, currentTime: 0.8 }, [], ui); } catch (error) { conflict = String(error); }
     const committed = await a.latest(); a.close(); b.close();
-    return { migration, previous: previous.record.revision, conflict, playhead: committed.record.snapshot.currentTime };
+    return { migration, previous: previous.record.revision, previousFormat: previous.record.formatVersion,
+      currentFormat: committed.record.formatVersion, conflict, playhead: committed.record.snapshot.currentTime };
   });
   expect(result.migration).toContain("injected schema migration fault");
   expect(result.previous).toBe(1);
+  expect(result.previousFormat).toBe(1); expect(result.currentFormat).toBe(2);
   expect(result.conflict).toContain("another tab");
   expect(result.playhead).toBe(0.5);
 });

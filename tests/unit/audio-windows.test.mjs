@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { loadModule } from "../source-probes.mjs";
 
 const { audioChunkWindow } = loadModule("services/audio.ts");
+const { scheduleAudioChunk } = loadModule("services/audio.ts");
 const selection = {
   sourceStart: 0.05,
   sourceEnd: 0.1,
@@ -111,4 +112,23 @@ test("long source timestamps do not discard frames through subtraction roundoff"
       close(plan.duration, 1000 / sampleRate);
     }
   }
+});
+test("scheduled grains share integer output sample boundaries at fractional cuts", () => {
+  const starts = [];
+  const buffer = { sampleRate: 48000, length: 48000, numberOfChannels: 1,
+    getChannelData: () => new Float32Array(48000) };
+  const context = { sampleRate: 44100, destination: {},
+    createBuffer: () => ({ copyToChannel() {} }),
+    createBufferSource: () => ({ connect() {}, disconnect() {}, start: (...args) => starts.push(args) }) };
+  for (const timelineStart of [0, 0.1001]) scheduleAudioChunk(context, buffer, 0,
+    { sourceStart: 0, sourceEnd: 0.1001, timelineStart, timelineEnd: 1 });
+  assert.ok(Math.abs(starts[0][0] + starts[0][2] - starts[1][0]) < 1e-10);
+  for (const [when, offset, duration] of starts) {
+    assert.ok(Math.abs(when * 44100 - Math.round(when * 44100)) < 1e-8);
+    assert.ok(Math.abs(duration * 44100 - Math.round(duration * 44100)) < 1e-8);
+    assert.ok(offset >= 0);
+  }
+  scheduleAudioChunk(context, { ...buffer, sampleRate: 44100, length: 44100 }, 0,
+    { sourceStart: 0.2, sourceEnd: 0.5, timelineStart: 0.4, timelineEnd: 1 });
+  assert.ok(starts.at(-1)[1] >= 0, "a rounded 0.4-second start cannot create a negative offset");
 });

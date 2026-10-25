@@ -1260,3 +1260,6 @@ select:hover:not(:disabled),
 .recovery-notice .button { white-space: normal; }
 .editor-app:has(.recovery-notice) { height: auto; overflow: visible; }
 .editor-app:has(.recovery-notice) .editor-workspace { min-height: 440px; }
+.inspector-section .track-volume { display: grid; gap: var(--space-sm); }
+.track-volume span { overflow-wrap: anywhere; }
+.track-volume input { width: 100%; min-height: 44px; }

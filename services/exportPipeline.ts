@@ -1,9 +1,10 @@
 import { renderInWorker } from "./renderWorker";
 import { decodeAudioInWorker } from "./audioWorker";
 import { ExportResources } from "./exportJob";
+import { clipHasSound, mixPolicy, trackGain } from "./mixing";
 import { Flow } from "../platform";
 import { ffmpegService } from "./ffmpegService";
-import { scheduleAudioChunk, type AudioSelection } from "./audio";
+import { scheduleAudioChunk, combineAudioChunks, type AudioSelection } from "./audio";
 import { activeIntervals, canvasFit, createOpacitySampler, estimateExport, exportFrameRate, frameCount,
   frameTimestamp, intervalsOverlap, sourceTimeAt, sourceWindow } from "./timeline";
 import { logEvent as sysLog } from "./journalService";
@@ -57,7 +58,10 @@ const audioBufferToWav = (buffer: AudioBuffer): Uint8Array<ArrayBuffer> => {
   let off = 44;
   for (let i = 0; i < len; i++) {
     for (let c = 0; c < numCh; c++) {
-      const s = Math.max(-1, Math.min(1, chans[c][i]));
+      const value = chans[c][i];
+      if (!Number.isFinite(value) || Math.abs(value) > 1.00001)
+        throw new Error("Audio mix exceeds full scale. Lower a track volume before exporting; the mix was not silently clipped.");
+      const s = Math.max(-1, Math.min(1, value));
       dv.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
       off += 2;
     }
@@ -148,6 +152,7 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
     addLog(`Splitting workload into 2 parallel threads...`);
     const mixAudio = async (signal?: AbortSignal, owned: ExportResources = new ExportResources(), onLog: (message: string) => void = () => {}): Promise<Uint8Array> => {
       const rate = 44100;
+      const policy = mixPolicy(mediaAssets, audioTracks);
       const frames = Math.ceil(Math.max(1, totalDuration * rate));
       const mixed = new Uint8Array(44 + frames * 4);
       // OfflineAudioContext has no close(). Keep its native work bounded and
@@ -157,39 +162,43 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
         const length = Math.min(2 * rate, frames - first);
         const offset = first / rate;
         const offlineCtx = new OfflineAudioContext(2, length, rate);
-        const nodes: AudioBufferSourceNode[] = [];
+        const nodes: AudioNode[] = [];
+        const bus = offlineCtx.createGain();
+        bus.gain.value = policy.gain; bus.connect(offlineCtx.destination); nodes.push(bus);
         let rendering: Promise<AudioBuffer> | undefined;
         const stop = async () => {
-          nodes.forEach(node => { try { node.stop(); } catch {} node.disconnect(); });
+          nodes.forEach(node => { if (node instanceof AudioBufferSourceNode) try { node.stop(); } catch {} node.disconnect(); });
           if (rendering) await rendering.catch(() => {});
         };
         const releaseAudio = owned?.own(stop) ?? stop;
         try {
-          const mixSource = async (sourceId: string, name: string, selection: AudioSelection, allowSilentVideo = false) => {
+          const mixSource = async (sourceId: string, name: string, selection: AudioSelection, gain: number, allowSilentVideo = false) => {
             signal?.throwIfAborted();
             const from = Math.max(selection.sourceStart, selection.sourceStart - selection.timelineStart);
             const to = Math.min(selection.sourceEnd, selection.sourceStart + selection.timelineEnd - selection.timelineStart);
             if (to <= from) return;
             try {
               const chunks = await decodeAudioInWorker(await getBlob(sourceId), from, to, owned, allowSilentVideo, onLog);
-              for (const chunk of chunks) {
+              const chunk = combineAudioChunks(chunks);
+              if (chunk) {
                 signal?.throwIfAborted();
-                const node = scheduleAudioChunk(offlineCtx, chunk.buffer, chunk.timestamp, selection);
-                if (node) nodes.push(node);
+                scheduleAudioChunk(offlineCtx, chunk.buffer, chunk.timestamp, selection,
+                  { gain, destination: bus, onNode: node => nodes.push(node) });
               }
             } catch (error) { throw new Error(`Cannot decode audio for ${name}: ${String(error)}`); }
           };
           const windowEnd = Math.min(length / rate, totalDuration - offset);
           for (const asset of mediaAssets) {
-            if (asset.type !== "video" || !asset.hasAudio || asset.muted) continue;
+            if (!clipHasSound(asset)) continue;
             const window = sourceWindow(asset);
             await mixSource(asset.sourceId, asset.name, { sourceStart: window.start,
               sourceEnd: Math.min(window.end, window.start + asset.duration),
-              timelineStart: asset.startTime - offset, timelineEnd: windowEnd }, true);
+              timelineStart: asset.startTime - offset, timelineEnd: windowEnd }, trackGain(asset), true);
           }
           for (const track of audioTracks) {
+            if (trackGain(track) === 0) continue;
             await mixSource(track.sourceId, track.name, { sourceStart: 0, sourceEnd: track.duration,
-              timelineStart: track.startTime - offset, timelineEnd: windowEnd });
+              timelineStart: track.startTime - offset, timelineEnd: windowEnd }, trackGain(track));
           }
           signal?.throwIfAborted();
           rendering = offlineCtx.startRendering();

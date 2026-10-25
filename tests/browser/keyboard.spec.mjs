@@ -1,18 +1,30 @@
 import { test, expect } from "./harness.mjs";
 import { asset, draft } from "./fixtures.mjs";
-import { openEditor, loadDraft, saveDraft } from "./helpers.mjs";
+import { openEditor, loadDraft } from "./helpers.mjs";
 
 test("keyboard selection, editing, seeking and dialogs retain focus without editor shortcuts", async ({ page }) => {
   await openEditor(page);
-  await loadDraft(page, draft([await asset("bars-fractional-av.mp4")]));
+  const open = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "Open project", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  await (await open).setFiles({ name: "keyboard.json", mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(draft([await asset("bars-fractional-av.mp4")]))) });
+  await expect(page.locator('[data-editor-status="READY"]')).toBeVisible();
   const clip = page.getByRole("button", { name: "Edit bars-fractional-av.mp4", exact: true });
   await clip.focus();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("button", { name: "Close clip settings" })).toBeFocused();
   await page.keyboard.press("Tab");
+  await expect(page.getByRole("button", { name: "Relink original video", exact: true })).toBeFocused();
+  await page.keyboard.press("Tab");
   await expect(page.getByLabel("Look", { exact: true })).toBeFocused();
-  await page.getByLabel("Look", { exact: true }).selectOption("warm");
-  await page.getByRole("button", { name: "Close clip settings" }).press("Enter");
+  await page.keyboard.press("End");
+  await page.keyboard.press("ArrowUp");
+  await expect(page.getByLabel("Look", { exact: true })).toHaveValue("warm");
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.getByRole("button", { name: "Close clip settings" })).toBeFocused();
+  await page.keyboard.press("Enter");
   await expect(clip).toBeFocused();
   const recorder = page.getByText("Record voice-over", { exact: true });
   await recorder.focus();
@@ -21,7 +33,12 @@ test("keyboard selection, editing, seeking and dialogs retain focus without edit
   await expect(page.getByRole("button", { name: "Play preview", exact: true })).toBeVisible();
   await page.getByRole("slider", { name: "Playhead time", exact: true }).focus();
   await page.keyboard.press("ArrowRight");
-  expect((await saveDraft(page)).currentTime).toBeGreaterThan(0);
+  const saved = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save project", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  const stream = await (await saved).createReadStream(), parts = [];
+  for await (const part of stream) parts.push(part);
+  expect(JSON.parse(Buffer.concat(parts).toString()).currentTime).toBeGreaterThan(0);
   for (const name of ["About ClipBraid", "Details"]) {
     const opener = page.getByRole("button", { name, exact: true });
     await opener.focus();
@@ -35,6 +52,12 @@ test("keyboard selection, editing, seeking and dialogs retain focus without edit
     await page.keyboard.press("Escape");
     await expect(opener).toBeFocused();
   }
+  await page.getByRole("button", { name: "draft", exact: true }).focus();
+  await page.keyboard.press("Space");
+  const exported = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export video", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  expect(await (await exported).failure()).toBeNull();
 });
 
 test("browser accessibility tree names every exposed control", async ({ page, context }, info) => {

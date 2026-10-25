@@ -23,6 +23,7 @@ workerScope.onmessage = async ({ data }: MessageEvent<{
         const channels = Array.from({ length: sample.numberOfChannels }, (_, planeIndex) => {
           const pcm = new Float32Array(sample.numberOfFrames);
           sample.copyTo(pcm, { planeIndex, format: "f32-planar" });
+          for (const value of pcm) if (!Number.isFinite(value)) throw new Error("Decoded audio contains non-finite samples.");
           transfer.push(pcm.buffer); return pcm;
         });
         chunks.push({ timestamp: sample.timestamp, sampleRate: sample.sampleRate, channels });
