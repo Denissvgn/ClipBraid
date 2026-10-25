@@ -23,6 +23,7 @@ export interface RecordedAudio {
 }
 
 export interface FlowApi {
+  capabilities?: { maxSaveBytes?: number; maxBase64Chars?: number };
   media: { select(opts: { filter: string }): Promise<SelectedMedia | null> };
   microphone: { record(opts: { durationMs: number }): Promise<RecordedAudio> };
   download(opts: { base64: string; mimeType: string; filename: string }): Promise<unknown>;

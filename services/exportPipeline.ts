@@ -1,5 +1,5 @@
 import { renderVisualPlan, validateSegments } from "./encoderPlan";
-import { deliverVideo, deliveryFailure } from "./delivery";
+import { deliverVideo, deliveryFailure, assertVideoSize } from "./delivery";
 import { outputProfile, frameSegments } from "./outputProfile";
 import { renderInWorker } from "./renderWorker";
 import { preflightAssets } from "./preflight";
@@ -230,11 +230,13 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
       context.event("verified", { videoFrames: profile.frames, width: profile.width, height: profile.height, bytes: masterBytes.byteLength });
     } finally { await releaseVerification(); }
     phase("saving");
+    assertVideoSize(masterBytes.byteLength);
     const b64 = await blobToBase64(
       new Blob([masterBytes.buffer as ArrayBuffer], { type: "video/mp4" }), resources.signal,
     );
 
     setExportProgress(95);
+    assertVideoSize(masterBytes.byteLength, b64.length);
     addLog(
       `Final payload: ${(b64.length / 1048576).toFixed(1)} MiB (base64)`,
     );

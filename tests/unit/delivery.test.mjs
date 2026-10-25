@@ -7,10 +7,10 @@ test("delivery receipts distinguish browser initiation, host acceptance and erro
     [undefined,true,null,"unknown"], [{cancelled:true},true,null,"cancelled"], [{success:true},true,null,"unknown"]]) {
     const { deliverVideo } = loadModule("services/delivery.ts", { "../platform": { Flow: { save: async () => response }, isHostedFlow: () => hosted } });
     if (outcome) assert.equal((await deliverVideo({ base64: "AQ==", mimeType:"video/mp4", name:"video.mp4" })).outcome,outcome);
-    else await assert.rejects(deliverVideo({}), error => error.category===category);
+    else await assert.rejects(deliverVideo({base64:"AQ==",mimeType:"video/mp4",name:"video.mp4"}), error => error.category===category);
   }
   for (const [name, category] of [["AbortError","cancelled"],["NotAllowedError","denied"],["NotSupportedError","unsupported"],["Error","transport"]]) {
     const { deliverVideo } = loadModule("services/delivery.ts", { "../platform": { Flow: { save: async () => { const e=new Error("fault");e.name=name;throw e; } }, isHostedFlow: () => true } });
-    await assert.rejects(deliverVideo({}), error=>error.category===category);
+    await assert.rejects(deliverVideo({base64:"AQ==",mimeType:"video/mp4",name:"video.mp4"}), error=>error.category===category);
   }
 });

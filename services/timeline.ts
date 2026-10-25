@@ -261,23 +261,16 @@ export function exportFrameRate(sourceFps: number): number {
     : 30;
 }
 export function estimateExport(quality: ExportQuality, duration: number) {
-  const sizeGoal = { draft: 16, standard: 32, high: 64 }[quality];
   const audioBitrate = 192_000;
-  const videoBitrate = Math.min(
-    4_000_000,
-    Math.max(
-      500_000,
-      Math.floor((sizeGoal * 8 * 1024 * 1024 * 0.8) / duration) - audioBitrate,
-    ),
-  );
-  // Bitrate budgets are approximate. Include audio and a container allowance;
-  // the video-quality floor can exceed the sizing goal on a long timeline.
+  const videoBitrate = { draft: 500_000, standard: 2_000_000, high: 4_000_000 }[quality];
+  // Advisory VBR estimate with container allowance; never an output-size promise.
   const estimatedBytes = Math.ceil(
     (((videoBitrate + audioBitrate) * duration) / 8) * 1.05,
   );
   return {
     videoBitrate,
     audioBitrate,
+    estimatedBytes,
     estimatedMiB: estimatedBytes / 1048576,
     base64MiB: (Math.ceil(estimatedBytes / 3) * 4) / 1048576,
   };

@@ -1489,8 +1489,10 @@ export default function App() {
                   </div>
                   <p className="helper-text">
                     ~{exportEstimate.estimatedMiB.toFixed(1)} MiB estimated ·
-                    actual size varies
+                    actual size varies · ~{exportEstimate.base64MiB.toFixed(1)} MiB base64 transport
                   </p>
+                  <p className="helper-text">{Math.round(exportEstimate.videoBitrate / 1000)} kb/s video + {Math.round(exportEstimate.audioBitrate / 1000)} kb/s audio. Estimates are advisory. Video handoff is capped at 96 MiB; host limits may be lower.</p>
+                  {exportEstimate.estimatedBytes > 96 * 1048576 && <p className="helper-text">This estimate exceeds the delivery cap. Consider a lower profile or shorter timeline; actual bytes are checked before delivery.</p>}
                 </section>
                 {videos.length > 0 && (
                   <section className="inspector-section" aria-label="Preview optimization">
