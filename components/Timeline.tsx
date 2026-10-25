@@ -95,6 +95,7 @@ export const Timeline: React.FC<TimelineProps> = ({
                 <button
                   className="clip-select"
                   aria-label={`Edit ${asset.name}`}
+                  aria-pressed={selectedAssetId === asset.id}
                   title={asset.name}
                   onClick={(event) => {
                     event.stopPropagation();

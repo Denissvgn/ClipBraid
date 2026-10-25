@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import { useModalDialog } from "./useModalDialog";
 import {
   JournalEntry,
   filterJournal,
@@ -10,16 +11,11 @@ export const JournalViewer: React.FC<{
   entries: JournalEntry[];
   onClose: () => void;
 }> = ({ entries, onClose }) => {
-  const dialog = useRef<HTMLDialogElement>(null);
+  const dialog = useModalDialog();
   const [tab, setTab] = useState<"events" | "devlog">("events");
   const [query, setQuery] = useState("");
   const [tick, setTick] = useState(0);
   useEffect(() => subscribeEvents(() => setTick((value) => value + 1)), []);
-  useEffect(() => {
-    const el = dialog.current;
-    el?.showModal();
-    return () => el?.close();
-  }, []);
   const events = useMemo(
     () =>
       getEvents()

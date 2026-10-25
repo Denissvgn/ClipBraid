@@ -1,16 +1,12 @@
-import React, { useEffect, useRef } from "react";
+import React from "react";
+import { useModalDialog } from "./useModalDialog";
 import { BrandMark } from "./BrandMark";
 import { Icon } from "./Icon";
 
 export const IntroModal: React.FC<{ onDismiss: () => void }> = ({
   onDismiss,
 }) => {
-  const dialog = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    const el = dialog.current;
-    el?.showModal();
-    return () => el?.close();
-  }, []);
+  const dialog = useModalDialog();
   return (
     <dialog
       ref={dialog}

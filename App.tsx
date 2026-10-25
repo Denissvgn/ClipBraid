@@ -236,6 +236,16 @@ export default function App() {
   const projectInputRef = useRef<HTMLInputElement>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
   const timelineContainerRef = useRef<HTMLDivElement>(null);
+  const clipSettingsCloseRef = useRef<HTMLButtonElement>(null);
+  const clipTriggerRef = useRef<HTMLElement | null>(null);
+  const addVisualRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (selectedAssetId) clipSettingsCloseRef.current?.focus();
+  }, [selectedAssetId]);
+  const closeClipSettings = () => {
+    setSelectedAssetId(null);
+    clipTriggerRef.current?.focus();
+  };
 
   // Progress tracker for parallel segments
   const segmentProgress = useRef<number[]>([0, 0]);
@@ -605,7 +615,10 @@ export default function App() {
     (id: string) => {
       const asset = cleanupRef.current.mediaAssets.find((m) => m.id === id);
       if (asset) logEvent("info", `Clip removed: ${asset.name}`);
-      if (selectedAssetId === id) setSelectedAssetId(null);
+      if (selectedAssetId === id) {
+        setSelectedAssetId(null);
+        addVisualRef.current?.focus();
+      }
       setMediaAssets((prev) => {
         return recalculateMediaStartTimes(prev.filter((m) => m.id !== id));
       });
@@ -621,14 +634,12 @@ export default function App() {
   // Delete/Backspace = remove selected clip. Ignored while typing or exporting.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.ctrlKey || e.altKey || e.metaKey) return;
       if (isExporting || isRecording || showIntro || showJournal) return;
       const target = e.target as HTMLElement | null;
       if (
         target &&
-        (target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.tagName === "SELECT" ||
-          target.tagName === "BUTTON" ||
+        (target.closest("input, textarea, select, button, summary, a, [role=dialog]") ||
           target.isContentEditable)
       )
         return;
@@ -1450,6 +1461,7 @@ export default function App() {
         </div>
         <div className="creation-actions" aria-label="Create your video">
           <button
+            ref={addVisualRef}
             className="button secondary"
             onClick={handleImportMedia}
             disabled={isExporting}
@@ -1564,6 +1576,20 @@ export default function App() {
               </div>
             )}
           </div>
+          <label className="playhead-control">
+            Playhead
+            <input
+              type="range"
+              aria-label="Playhead time"
+              min="0"
+              max={totalDuration}
+              step="0.01"
+              value={currentTime}
+              aria-valuetext={`${currentTime.toFixed(2)} seconds`}
+              onChange={event => seekTo(Number(event.target.value))}
+              disabled={isExporting}
+            />
+          </label>
           <div className="playback-toolbar">
             <span className="time-readout">
               {displayTime(currentTime)}
@@ -1637,8 +1663,9 @@ export default function App() {
                 <div className="inspector-heading">
                   <h2>Clip settings</h2>
                   <button
+                    ref={clipSettingsCloseRef}
                     className="icon-button"
-                    onClick={() => setSelectedAssetId(null)}
+                    onClick={closeClipSettings}
                     aria-label="Close clip settings"
                   >
                     <Icon name="close" />
@@ -1977,13 +2004,17 @@ export default function App() {
           onDeleteAudio={handleDeleteAudio}
           onMoveMedia={handleMoveMedia}
           onToggleMute={handleToggleMute}
-          onSelectAsset={setSelectedAssetId}
+          onSelectAsset={id => {
+            clipTriggerRef.current = document.activeElement as HTMLElement;
+            setSelectedAssetId(id);
+            if (id === selectedAssetId) clipSettingsCloseRef.current?.focus();
+          }}
         />
       </section>
       <footer className="editor-statusbar">
         <span
-          role="status"
-          aria-live="polite"
+          role={status.includes("ERROR") ? "alert" : "status"}
+          aria-live={status.includes("ERROR") ? "assertive" : "polite"}
           data-editor-status={status}
           className={status.includes("ERROR") ? "status-error" : ""}
         >

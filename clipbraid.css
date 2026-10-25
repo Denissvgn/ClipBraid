@@ -783,7 +783,7 @@ input[type="range"]::-moz-range-thumb {
   font-size: var(--text-xs);
   color: var(--color-muted);
 }
-.editor-statusbar [role="status"] {
+.editor-statusbar [data-editor-status] {
   display: flex;
   align-items: center;
   gap: var(--space-sm);
@@ -1071,7 +1071,7 @@ input[type="range"]::-moz-range-thumb {
   .status-hint {
     display: none;
   }
-  .editor-statusbar [role="status"] {
+  .editor-statusbar [data-editor-status] {
     max-width: 75%;
   }
 }
@@ -1232,4 +1232,18 @@ select:hover:not(:disabled),
 }
 .track-label > span {
   white-space: nowrap;
+}
+.playhead-control {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  font-size: var(--text-xs);
+}
+.playhead-control input {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+}
+.clip-select:focus-visible {
+  outline-offset: -4px;
 }
