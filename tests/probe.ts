@@ -2,4 +2,9 @@
 import * as media from "mediabunny";
 import * as timeline from "../services/timeline";
 import { ffmpegService } from "../services/ffmpegService";
-Object.assign(window, { testRuntime: { media, ffmpegService, timeline } });
+import React from "react";
+import { createRoot } from "react-dom/client";
+import { AudioEngine } from "../components/AudioEngine";
+Object.assign(window, {
+  testRuntime: { media, ffmpegService, timeline, React, createRoot, AudioEngine },
+});

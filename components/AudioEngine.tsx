@@ -9,6 +9,13 @@ interface AudioEngineProps {
   currentTime: number;
   isPlaying: boolean;
 }
+
+const releaseAudio = (audio: HTMLAudioElement) => {
+  audio.pause();
+  audio.removeAttribute("src");
+  audio.load();
+};
+
 export const AudioEngine = memo(
   ({
     audioTracks = [],
@@ -36,8 +43,7 @@ export const AudioEngine = memo(
       );
       for (const [id, audio] of audioRefs.current.entries()) {
         if (!currentIds.has(id) || audio.src !== desiredUrls.get(id)) {
-          audio.pause();
-          audio.src = "";
+          releaseAudio(audio);
           audioRefs.current.delete(id);
         }
       }
@@ -63,14 +69,10 @@ export const AudioEngine = memo(
           }
         }
       }
-    }, [audioTracks, mediaAssets]);
+    }, [audioTracks, mediaAssets, sourceUrl]);
     useEffect(
       () => () => {
-        for (const audio of audioRefs.current.values()) {
-          audio.pause();
-          audio.removeAttribute("src");
-          audio.load();
-        }
+        for (const audio of audioRefs.current.values()) releaseAudio(audio);
         audioRefs.current.clear();
       },
       [],
@@ -119,7 +121,7 @@ export const AudioEngine = memo(
           }
         }
       });
-    }, [isPlaying, currentTime, audioTracks, mediaAssets]);
+    }, [isPlaying, currentTime, audioTracks, mediaAssets, sourceUrl]);
     return null;
   },
 );

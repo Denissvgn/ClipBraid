@@ -157,7 +157,7 @@ test("replacing a project with the same clip ID replaces its audio source and pa
       ),
     )
     .toEqual([
-      { url: "", paused: true },
+      { url: null, paused: true },
       { url: current, paused: true },
     ]);
 });

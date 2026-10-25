@@ -59,6 +59,9 @@ test("one audible preview source per clip", async ({ page }, info) => {
     contentType: "application/json",
   });
   expect(sources).toHaveLength(1);
+  expect(
+    await page.locator("video").evaluateAll((videos) => videos.every((v) => v.muted)),
+  ).toBe(true);
 });
 
 test("editor actions remain reachable at phone, tablet and laptop widths", async ({
