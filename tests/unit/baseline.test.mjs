@@ -51,7 +51,7 @@ test("preview/export transition weights change only during the actual overlap", 
     [5.5, [0.5, 0.5]],
     [6, [0, 1]],
   ]) {
-    const opacity = evaluate("services/exportPipeline.ts", "opacityAt", {
+    const opacity = evaluate("services/renderSegment.ts", "opacityAt", {
       createOpacitySampler,
       mediaAssets,
     });

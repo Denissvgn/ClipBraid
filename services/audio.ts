@@ -50,7 +50,7 @@ export function scheduleAudioChunk(
   buffer: AudioBuffer,
   timestamp: number,
   selection: AudioSelection,
-): void {
+): AudioBufferSourceNode | undefined {
   const window = audioChunkWindow(
     timestamp,
     buffer.length,
@@ -58,18 +58,23 @@ export function scheduleAudioChunk(
     selection,
   );
   if (!window) return;
+  const retained = audioChunkWindow(timestamp, buffer.length, buffer.sampleRate, {
+    ...selection,
+    timelineStart: 0,
+    timelineEnd: selection.sourceEnd - selection.sourceStart,
+  })!;
   let selected = buffer;
-  if (window.first !== 0 || window.end !== buffer.length) {
+  if (retained.first !== 0 || retained.end !== buffer.length) {
     // Offset/duration alone let a resampler interpolate excluded neighbors.
     // Copy only boundary chunks; full chunks keep their existing buffers.
     selected = context.createBuffer(
       buffer.numberOfChannels,
-      window.end - window.first,
+      retained.end - retained.first,
       buffer.sampleRate,
     );
     for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
       selected.copyToChannel(
-        buffer.getChannelData(channel).subarray(window.first, window.end),
+        buffer.getChannelData(channel).subarray(retained.first, retained.end),
         channel,
       );
     }
@@ -77,5 +82,6 @@ export function scheduleAudioChunk(
   const source = context.createBufferSource();
   source.buffer = selected;
   source.connect(context.destination);
-  source.start(window.when, 0, window.duration);
+  source.start(window.when, (window.first - retained.first) / buffer.sampleRate, window.duration);
+  return source;
 }

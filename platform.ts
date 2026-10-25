@@ -26,7 +26,7 @@ export interface FlowApi {
   media: { select(opts: { filter: string }): Promise<SelectedMedia | null> };
   microphone: { record(opts: { durationMs: number }): Promise<RecordedAudio> };
   download(opts: { base64: string; mimeType: string; filename: string }): Promise<unknown>;
-  save(opts: { base64: string; mimeType: string; name: string }): Promise<unknown>;
+  save(opts: { base64: string; mimeType: string; name: string; signal?: AbortSignal }): Promise<unknown>;
 }
 
 const blobToBase64 = (blob: Blob): Promise<string> =>
@@ -49,7 +49,8 @@ const pickFile = (accept: string): Promise<File | null> =>
     input.click();
   });
 
-const triggerDownload = (base64: string, mimeType: string, filename: string) => {
+const triggerDownload = (base64: string, mimeType: string, filename: string, signal?: AbortSignal) => {
+  signal?.throwIfAborted();
   const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
   const url = URL.createObjectURL(new Blob([bytes], { type: mimeType }));
   const a = document.createElement('a');
@@ -102,7 +103,7 @@ const browserShim: FlowApi = {
     },
   },
   download: ({ base64, mimeType, filename }) => triggerDownload(base64, mimeType, filename),
-  save: ({ base64, mimeType, name }) => triggerDownload(base64, mimeType, name),
+  save: ({ base64, mimeType, name, signal }) => triggerDownload(base64, mimeType, name, signal),
 };
 
 declare global {

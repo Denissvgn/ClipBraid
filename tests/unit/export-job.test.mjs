@@ -72,3 +72,69 @@ test("source setup and invalid state transitions become recoverable failures", a
   assert.match(missing.getSnapshot().error, /Missing media source/);
   assert.equal(sources.active(), 0);
 });
+
+for (const operation of ["decode", "encode", "mix", "mux", "save"]) {
+  test(`cancel ${operation} disposes owned work and permits three healthy retry cycles`, async () => {
+    const sources = store(); let block = true, alive = 0;
+    const jobs = new ExportJobs(sources, async (_, ctx) => {
+      ctx.phase(operation === "mux" ? "muxing" : operation === "save" ? "saving" : "rendering");
+      if (block) {
+        alive++;
+        const release = ctx.resources.own(() => { alive--; });
+        await ctx.resources.wait(new Promise(() => {}), release);
+      }
+      return { videoBytes: 1, delivery: "adapter-accepted" };
+    });
+    for (let cycle = 0; cycle < 3; cycle++) {
+      block = true;
+      const pending = jobs.start(input());
+      jobs.cancel();
+      assert.equal(jobs.getSnapshot().phase, "cancelling");
+      await pending;
+      assert.equal(jobs.getSnapshot().phase, "cancelled");
+      assert.equal(jobs.getSnapshot().cleanupComplete, true);
+      assert.equal(alive, 0);
+      assert.equal(sources.active(), 0);
+      block = false;
+      await jobs.start(input());
+      assert.equal(jobs.getSnapshot().phase, "complete");
+    }
+  });
+}
+test("inactivity terminates its owner and a cleanup failure blocks unsafe retries", async () => {
+  const sources = store(); let stopped = false;
+  const jobs = new ExportJobs(sources, async (_, ctx) => {
+    const release = ctx.resources.own(() => { stopped = true; });
+    await ctx.resources.wait(new Promise(() => {}), release);
+    throw new Error("unreachable");
+  }, { inactivityMs: 10 });
+  await jobs.start(input());
+  assert.equal(stopped, true);
+  assert.equal(jobs.getSnapshot().phase, "failed");
+  assert.match(jobs.getSnapshot().error, /inactive/);
+  const broken = new ExportJobs(sources, async (_, ctx) => {
+    ctx.resources.own(() => { throw new Error("cannot release"); });
+    return { videoBytes: 1, delivery: "adapter-accepted" };
+  });
+  await broken.start(input());
+  assert.equal(broken.getSnapshot().cleanupComplete, false);
+  const id = broken.getSnapshot().jobId;
+  await broken.start(input());
+  assert.equal(broken.getSnapshot().jobId, id);
+});
+test("a native operation refusing cleanup is visible and cannot enable an unsafe retry", async () => {
+  let unblock;
+  const jobs = new ExportJobs(store(), async () => {
+    await new Promise(resolve => { unblock = resolve; });
+    return { videoBytes: 1, delivery: "adapter-accepted" };
+  }, { cleanupMs: 10 });
+  const pending = jobs.start(input());
+  jobs.cancel();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(jobs.getSnapshot().cleanupComplete, false);
+  assert.equal(jobs.getSnapshot().phase, "failed");
+  assert.match(jobs.getSnapshot().error, /cleanup has not finished/);
+  assert.equal(jobs.start(input()), pending);
+  unblock(); await pending;
+  assert.equal(jobs.getSnapshot().cleanupComplete, true);
+});

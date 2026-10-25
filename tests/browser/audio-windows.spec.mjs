@@ -22,7 +22,7 @@ test("real decoded PCM excludes impulses on both resampled trim edges", async ({
         sourceId: "tone", originalDuration: 1, trimStart: start,
         trimEnd: 1 - end, duration, startTime: 0.037 };
       const scope = {
-        ...media, ...timeline, ...audio,
+        ...media, ...timeline, ...audio, ...window.testRuntime.lifecycle,
         mediaAssets: standalone ? [] : [clip],
         audioTracks: standalone ? [clip] : [], totalDuration: 0.3,
         getBlob: async () => blob,
@@ -61,7 +61,9 @@ test("real decoded sample windows preserve stereo, timestamp gaps and exact time
               yield { ...chunk, timestamp: chunk.timestamp + shift };
           }
         }
-        const scope = { ...media, ...timeline, ...audio, AudioBufferSink: ShiftedSink,
+        const scope = { ...media, ...timeline, ...audio, ...window.testRuntime.lifecycle, decodeAudioInWorker: async (blob, start, end, resources, ...args) =>
+            (await window.testRuntime.lifecycle.decodeAudioInWorker(blob, start - shift, end - shift, resources, ...args))
+              .map(chunk => ({ ...chunk, timestamp: chunk.timestamp + shift })),
           mediaAssets: [{ name: "stereo", type: "video", hasAudio: true,
             sourceId: "pcm", originalDuration: 1, trimStart: 0.05 + shift,
             trimEnd: 0.9 - shift, duration: 0.05, startTime: 0.037 }],
@@ -133,4 +135,50 @@ test("a short selected audio range survives actual AAC encoding with codec paddi
   expect(result.active).toBeGreaterThan(0.04);
   expect(result.before).toBeLessThan(0.002);
   expect(result.after).toBeLessThan(0.002);
+});
+
+test("audio rendering stays in bounded native batches and drains a cancelled batch", async ({ context }, info) => {
+  const page = await openProbe(context);
+  const result = await page.evaluate(async ({ mix, wav }) => {
+    const { media, timeline, audio, lifecycle } = window.testRuntime;
+    const encode = new Function(wav)();
+    const buffer = new AudioBuffer({ length: 5 * 48000, numberOfChannels: 1, sampleRate: 48000 });
+    buffer.getChannelData(0).fill(0.25);
+    const blob = new Blob([encode(buffer)]);
+    const NativeContext = window.OfflineAudioContext;
+    const lengths = []; let active = 0, cancel = false, resources;
+    window.OfflineAudioContext = function (...args) {
+      lengths.push(args[1]); active++;
+      const native = new NativeContext(...args), render = native.startRendering.bind(native);
+      native.startRendering = () => render().then(value => {
+        active--;
+        if (cancel) resources.abort();
+        return value;
+      });
+      return native;
+    };
+    const scope = { ...media, ...timeline, ...audio, ...lifecycle, mediaAssets: [],
+      audioTracks: [{ sourceId: "tone", name: "tone", startTime: 0, duration: 5 }],
+      totalDuration: 5, getBlob: async () => blob, audioBufferToWav: encode };
+    const fn = new Function(...Object.keys(scope), mix)(...Object.values(scope));
+    try {
+      const bytes = await fn();
+      const samples = new DataView(bytes.buffer);
+      const means = [1.99, 2, 3.99, 4].map(time => {
+        let sum = 0;
+        for (let i = 0; i < 100; i++) sum += samples.getInt16(44 + (Math.floor(time * 44100) + i) * 4, true) / 32767;
+        return sum / 100;
+      });
+      const beforeCancel = lengths.length;
+      cancel = true; resources = new lifecycle.ExportResources();
+      let error;
+      try { await fn(resources.signal, resources); } catch (cause) { error = cause.name; }
+      await resources.close();
+      return { lengths, means, active, owners: resources.size, error, cancelBatches: lengths.length - beforeCancel };
+    } finally { window.OfflineAudioContext = NativeContext; }
+  }, { mix: expression("services/exportPipeline.ts", "mixAudio"), wav: expression("services/exportPipeline.ts", "audioBufferToWav") });
+  expect(Math.max(...result.lengths)).toBeLessThanOrEqual(88200);
+  for (const mean of result.means) expect(mean).toBeCloseTo(0.25, 2);
+  expect(result).toMatchObject({ active: 0, owners: 0, error: "AbortError", cancelBatches: 1 });
+  await info.attach("bounded-audio", { body: JSON.stringify(result), contentType: "application/json" });
 });

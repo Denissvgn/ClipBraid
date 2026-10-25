@@ -199,6 +199,7 @@ export default function App() {
   const exportLogs = exportState.logs;
   useEffect(() => {
     if (exportState.phase === "complete") setStatus("READY");
+    if (exportState.phase === "cancelled") setStatus("EXPORT CANCELLED");
     if (exportState.phase === "failed") {
       setStatus("EXPORT ERROR");
       logEvent("error", `Export failed: ${exportState.error}`);
@@ -247,6 +248,7 @@ export default function App() {
   }, [mediaAssets, audioTracks]);
   useEffect(() => {
     return () => {
+      exportJobs.dispose();
       storeRef.current!.clear();
     };
   }, []);
@@ -758,6 +760,8 @@ export default function App() {
       },
       // Legacy measurement API: normalization is deliberately disabled.
       normalizeAll: async () => 0,
+      exportState: exportJobs.getSnapshot,
+      exportDeadlines: exportJobs.setDeadlines,
     };
     return () => {
       delete (window as any).__clipbraidE2E;
@@ -787,7 +791,7 @@ export default function App() {
   // Originals stay authoritative. Proxy generation returns only with
   // provide separate, cancellable storage; never rewrite imported bytes in idle time.
   const handleExport = () => {
-    if (!mediaAssets.length || exportJobs.getSnapshot().active) return;
+    if (!mediaAssets.length || exportJobs.getSnapshot().active || !exportJobs.getSnapshot().cleanupComplete) return;
     setIsPlaying(false);
     setStatus("EXPORTING...");
     void exportJobs.start({ mediaAssets, audioTracks, aspectRatio, fitMode,
@@ -891,7 +895,7 @@ export default function App() {
           <button
             className="button primary"
             onClick={handleExport}
-            disabled={!mediaAssets.length || isExporting || isRecording}
+            disabled={!mediaAssets.length || isExporting || isRecording || !exportState.cleanupComplete}
             aria-busy={isExporting}
           >
             <Icon name="download" />
@@ -971,6 +975,18 @@ export default function App() {
                         value={exportProgress}
                         aria-label="Video export progress"
                       />
+                      <button
+                        className="button secondary"
+                        onClick={exportJobs.cancel}
+                        disabled={!exportState.cancellable}
+                      >
+                        Cancel export
+                      </button>
+                      <p role="status">
+                        {exportState.phase === "cancelling" || exportState.phase === "cleaning"
+                          ? "Stopping and releasing media…"
+                          : !exportState.cancellable ? "Waiting for the save adapter; delivery may have started." : "You can cancel and keep editing."}
+                      </p>
                     </>
                   ) : (
                     <p>{exportState.error || errorDetail}</p>

@@ -125,6 +125,7 @@ test("mixed PCM ends at clip trim", async ({ context }, info) => {
       };
       Object.assign(scope, window.testRuntime.timeline);
       Object.assign(scope, window.testRuntime.audio);
+      Object.assign(scope, window.testRuntime.lifecycle);
       const fn = new Function(...Object.keys(scope), mix)(
         ...Object.values(scope),
       );
@@ -294,9 +295,9 @@ test("contain margins clear after a landscape-to-portrait cut", async ({
     },
     {
       clips,
-      render: expression("services/exportPipeline.ts", "renderSegment"),
-      opacity: expression("services/exportPipeline.ts", "opacityAt"),
-      filter: expression("services/exportPipeline.ts", "applyCanvasFilter"),
+      render: expression("services/renderSegment.ts", "renderSegment"),
+      opacity: expression("services/renderSegment.ts", "opacityAt"),
+      filter: expression("services/renderSegment.ts", "applyCanvasFilter"),
     },
   );
   expect(result.center[2]).toBeGreaterThan(230);
@@ -386,9 +387,9 @@ test("parallel segment canvases render black before, between and after clips", a
     },
     {
       clips,
-      render: expression("services/exportPipeline.ts", "renderSegment"),
-      opacity: expression("services/exportPipeline.ts", "opacityAt"),
-      filter: expression("services/exportPipeline.ts", "applyCanvasFilter"),
+      render: expression("services/renderSegment.ts", "renderSegment"),
+      opacity: expression("services/renderSegment.ts", "opacityAt"),
+      filter: expression("services/renderSegment.ts", "applyCanvasFilter"),
     },
   );
   await info.attach("empty-frame-pixels", {

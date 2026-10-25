@@ -386,8 +386,8 @@ test("preview and encoded crossfades preserve brightness throughout the overlap"
     },
     {
       clips,
-      render: expression("services/exportPipeline.ts", "renderSegment"),
-      filter: expression("services/exportPipeline.ts", "applyCanvasFilter"),
+      render: expression("services/renderSegment.ts", "renderSegment"),
+      filter: expression("services/renderSegment.ts", "applyCanvasFilter"),
     },
   );
   for (const pixel of [pixels[0], pixels[1]]) {
@@ -452,11 +452,12 @@ test("trimmed buffers exclude both boundaries and standalone tracks end at their
         ],
         audioTracks: [],
         totalDuration: 1,
-        getBlob: async () => new Blob(["fixture"]),
+        getBlob: async () => new Blob([new Function(wav)()(buffer)]),
         audioBufferToWav: new Function(wav)(),
       };
       Object.assign(scope, window.testRuntime.timeline);
       Object.assign(scope, window.testRuntime.audio);
+      Object.assign(scope, window.testRuntime.lifecycle);
       const invoke = () =>
         new Function(...Object.keys(scope), mix)(...Object.values(scope))();
       const decode = async (bytes) =>

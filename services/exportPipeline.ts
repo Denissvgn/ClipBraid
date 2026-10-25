@@ -1,3 +1,6 @@
+import { renderInWorker } from "./renderWorker";
+import { decodeAudioInWorker } from "./audioWorker";
+import { ExportResources } from "./exportJob";
 import { Flow } from "../platform";
 import { ffmpegService } from "./ffmpegService";
 import { scheduleAudioChunk, type AudioSelection } from "./audio";
@@ -15,11 +18,15 @@ async function initMediaCodecs() {
   registerAc3Decoder();
   encodersInitialized = true;
 }
-const blobToBase64 = (blob: Blob): Promise<string> => {
+const blobToBase64 = (blob: Blob, signal?: AbortSignal): Promise<string> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve((reader.result as string).split(",")[1]);
-    reader.onerror = reject;
+    const cleanup = () => signal?.removeEventListener("abort", abort);
+    const abort = () => { reader.abort(); cleanup(); reject(signal?.reason); };
+    reader.onload = () => { cleanup(); resolve((reader.result as string).split(",")[1]); };
+    reader.onerror = () => { cleanup(); reject(reader.error); };
+    signal?.throwIfAborted();
+    signal?.addEventListener("abort", abort, { once: true });
     reader.readAsDataURL(blob);
   });
 };
@@ -57,41 +64,14 @@ const audioBufferToWav = (buffer: AudioBuffer): Uint8Array<ArrayBuffer> => {
   }
   return bytes;
 };
-const applyCanvasFilter = (
-  ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D,
-  filter: VisualFilter,
-) => {
-  switch (filter) {
-    case "grayscale":
-      ctx.filter = "grayscale(100%)";
-      break;
-    case "sepia":
-      ctx.filter = "sepia(100%)";
-      break;
-    case "noir":
-      ctx.filter = "grayscale(100%) contrast(150%) brightness(80%)";
-      break;
-    case "vintage":
-      ctx.filter = "sepia(50%) contrast(90%) brightness(110%) saturate(80%)";
-      break;
-    case "warm":
-      ctx.filter = "sepia(30%) saturate(120%) brightness(105%)";
-      break;
-    case "cool":
-      ctx.filter = "hue-rotate(180deg) saturate(80%) brightness(105%)";
-      break;
-    default:
-      ctx.filter = "none";
-      break;
-  }
-};
-
 export async function runExportPipeline(snapshot: ExportSnapshot, context: ExportContext): Promise<ExportResult> {
   const { mediaAssets, audioTracks, aspectRatio, fitMode, exportQuality, totalDuration } = snapshot;
   const { getBlob, addLog, setExportProgress, phase, report } = context;
   const segmentProgress = { current: [0, 0] };
+  const resources = context.resources;
+  const releaseFFmpeg = resources.own(() => ffmpegService.terminate());
   try {
-    await ffmpegService.load(addLog);
+    await resources.wait(ffmpegService.load(addLog), releaseFFmpeg);
     await initMediaCodecs();
     sysLog(
       "export",
@@ -127,15 +107,17 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
             source: new BlobSource(await getBlob(asset.sourceId)),
             formats: ALL_FORMATS,
           });
+          const releaseInput = resources.own(() => input.dispose());
           try {
-            const vt = await input.getPrimaryVideoTrack();
+            const vt = await resources.wait(input.getPrimaryVideoTrack(), releaseInput);
             if (!vt) throw new Error("Missing video track");
-            f = (await vt.computeFrameRateMetrics({ targetPacketCount: 128 }))
+            f = (await resources.wait(vt.computeFrameRateMetrics({ targetPacketCount: 128 }), releaseInput))
               .bestGuessFrameRate;
           } finally {
-            input.dispose();
+            await releaseInput();
           }
         } catch {
+          resources.signal.throwIfAborted();
           /* keep 0 */
         }
       }
@@ -150,10 +132,10 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
     // Pre-flight: fail fast with a clear message if this device has no AVC encoder
     // (same capability-gap class as the AAC encoder — verify codec availability before export).
     if (
-      !(await canEncodeVideo("avc", {
+      !(await resources.wait(canEncodeVideo("avc", {
         width: targetWidth,
         height: targetHeight,
-      }))
+      })))
     ) {
       throw new Error(
         "This device cannot encode AVC video — export is not supported in this environment.",
@@ -164,273 +146,75 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
     );
     phase("rendering");
     addLog(`Splitting workload into 2 parallel threads...`);
-    const mixAudio = async (signal?: AbortSignal): Promise<Uint8Array> => {
-      const offlineCtx = new OfflineAudioContext(
-        2,
-        Math.ceil(Math.max(1, totalDuration * 44100)),
-        44100,
-      );
-      const mixSource = async (
-        sourceId: string,
-        name: string,
-        selection: AudioSelection,
-        allowSilentVideo = false,
-      ) => {
+    const mixAudio = async (signal?: AbortSignal, owned: ExportResources = new ExportResources(), onLog: (message: string) => void = () => {}): Promise<Uint8Array> => {
+      const rate = 44100;
+      const frames = Math.ceil(Math.max(1, totalDuration * rate));
+      const mixed = new Uint8Array(44 + frames * 4);
+      // OfflineAudioContext has no close(). Keep its native work bounded and
+      // drain the current two-second batch before acknowledging cancellation.
+      for (let first = 0; first < frames; first += 2 * rate) {
         signal?.throwIfAborted();
-        const input = new Input({
-          source: new BlobSource(await getBlob(sourceId)),
-          formats: ALL_FORMATS,
-        });
+        const length = Math.min(2 * rate, frames - first);
+        const offset = first / rate;
+        const offlineCtx = new OfflineAudioContext(2, length, rate);
+        const nodes: AudioBufferSourceNode[] = [];
+        let rendering: Promise<AudioBuffer> | undefined;
+        const stop = async () => {
+          nodes.forEach(node => { try { node.stop(); } catch {} node.disconnect(); });
+          if (rendering) await rendering.catch(() => {});
+        };
+        const releaseAudio = owned?.own(stop) ?? stop;
         try {
-          const track = await input.getPrimaryAudioTrack();
-          // Older drafts may not know that a valid video is silent.
-          if (!track) {
-            if (allowSilentVideo) return;
-            throw new Error("Missing audio track");
-          }
-          if (!(await track.canDecode()))
-            throw new Error("Unsupported audio codec");
-          const sink = new AudioBufferSink(track);
-          for await (const wrapped of sink.buffers(
-            selection.sourceStart,
-            selection.sourceEnd,
-          )) {
+          const mixSource = async (sourceId: string, name: string, selection: AudioSelection, allowSilentVideo = false) => {
             signal?.throwIfAborted();
-            scheduleAudioChunk(
-              offlineCtx,
-              wrapped.buffer,
-              wrapped.timestamp,
-              selection,
-            );
-          }
-        } catch (error) {
-          throw new Error(
-            `Cannot decode audio for ${name}: ${String(error)}`,
-          );
-        } finally {
-          input.dispose();
-        }
-      };
-      for (const asset of mediaAssets) {
-        if (asset.type !== "video" || !asset.hasAudio || asset.muted)
-          continue;
-        const window = sourceWindow(asset);
-        await mixSource(
-          asset.sourceId,
-          asset.name,
-          {
-            sourceStart: window.start,
-            sourceEnd: Math.min(window.end, window.start + asset.duration),
-            timelineStart: asset.startTime,
-            timelineEnd: totalDuration,
-          },
-          true,
-        );
-      }
-      for (const track of audioTracks) {
-        await mixSource(track.sourceId, track.name, {
-          sourceStart: 0,
-          sourceEnd: track.duration,
-          timelineStart: track.startTime,
-          timelineEnd: totalDuration,
-        });
-      }
-      signal?.throwIfAborted();
-      return audioBufferToWav(await offlineCtx.startRendering());
-    };
-    const opacityAt = createOpacitySampler(mediaAssets);
-    const renderSegment = async (
-      start: number,
-      end: number,
-      index: number,
-      signal?: AbortSignal,
-    ): Promise<Uint8Array> => {
-      const segmentDuration = end - start;
-      if (segmentDuration <= 0) return new Uint8Array(0);
-      const output = new Output({
-        format: new Mp4OutputFormat({ fastStart: "in-memory" }),
-        target: new BufferTarget(),
-      });
-      const videoSource = new VideoSampleSource({
-        codec: "avc",
-        bitrate: videoBitrate,
-        keyFrameInterval: 4,
-      });
-      output.addVideoTrack(videoSource, { frameRate: fps });
-      const canvas = new OffscreenCanvas(targetWidth, targetHeight);
-      const ctx = canvas.getContext("2d", { alpha: false })!;
-      const sinks = new Map<string, VideoSampleSink>();
-      const images = new Map<string, ImageBitmap>();
-      const inputs: Input[] = [];
-      const relevantAssets = mediaAssets.filter((asset) =>
-        intervalsOverlap(asset, start, end),
-      );
-      let finalized = false;
-      let passed = 0,
-        composited = 0;
-      try {
-        for (const asset of relevantAssets) {
-          signal?.throwIfAborted();
-          try {
-            const blob = await getBlob(asset.sourceId);
-            if (asset.type === "image") {
-              images.set(asset.id, await createImageBitmap(blob));
-            } else {
-              // Each timeline clip owns its decoder, even for repeated sources.
-              const input = new Input({
-                source: new BlobSource(blob),
-                formats: ALL_FORMATS,
-              });
-              inputs.push(input);
-              const track = await input.getPrimaryVideoTrack();
-              if (!track || !(await track.canDecode()))
-                throw new Error("Missing or unsupported video track");
-              sinks.set(asset.id, new VideoSampleSink(track));
-            }
-          } catch (error) {
-            throw new Error(`Cannot decode ${asset.name}: ${String(error)}`);
-          }
-        }
-        await output.start();
-        const totalFrames = frameCount(segmentDuration, fps);
-        const segmentStarted = performance.now();
-        for (let i = 0; i < totalFrames; i++) {
-          signal?.throwIfAborted();
-          const t = frameTimestamp(i, fps, start);
-          const outTs = frameTimestamp(i, fps);
-          const visible = activeIntervals(relevantAssets, t);
-          const decoded = new Map<string, VideoSample>();
-          const frameFor = async (asset: MediaAsset) => {
-            if (decoded.has(asset.id)) return decoded.get(asset.id)!;
-            const sink = sinks.get(asset.id);
-            if (!sink) throw new Error(`Missing decoder for ${asset.name}`);
-            const local = sourceTimeAt(asset, t);
-            const sample = await sink.getSample(local);
-            if (!sample)
-              throw new Error(
-                `No decoded frame for ${asset.name} at ${local.toFixed(3)}s`,
-              );
-            decoded.set(asset.id, sample);
-            return sample;
+            const from = Math.max(selection.sourceStart, selection.sourceStart - selection.timelineStart);
+            const to = Math.min(selection.sourceEnd, selection.sourceStart + selection.timelineEnd - selection.timelineStart);
+            if (to <= from) return;
+            try {
+              const chunks = await decodeAudioInWorker(await getBlob(sourceId), from, to, owned, allowSilentVideo, onLog);
+              for (const chunk of chunks) {
+                signal?.throwIfAborted();
+                const node = scheduleAudioChunk(offlineCtx, chunk.buffer, chunk.timestamp, selection);
+                if (node) nodes.push(node);
+              }
+            } catch (error) { throw new Error(`Cannot decode audio for ${name}: ${String(error)}`); }
           };
-          try {
-            let handled = false;
-            if (visible.length === 1) {
-              const asset = visible[0];
-              if (
-                asset.type === "video" &&
-                asset.filter === "none" &&
-                opacityAt(asset, t) === 1
-              ) {
-                const src = await frameFor(asset);
-                const par = src.pixelAspectRatio;
-                if (
-                  src.displayWidth === targetWidth &&
-                  src.displayHeight === targetHeight &&
-                  src.rotation === 0 &&
-                  !src.flip &&
-                  par?.num === 1 &&
-                  par?.den === 1
-                ) {
-                  src.setTimestamp(outTs);
-                  src.setDuration(frameDuration);
-                  await videoSource.add(src);
-                  handled = true;
-                  passed++;
-                }
-              }
-            }
-            if (!handled) {
-              // Always reset the entire matte, including contain margins and
-              // frames following a different geometry/filter/transition.
-              ctx.globalAlpha = 1;
-              ctx.filter = "none";
-              ctx.globalCompositeOperation = "source-over";
-              ctx.fillStyle = "#000000";
-              ctx.fillRect(0, 0, targetWidth, targetHeight);
-              ctx.globalCompositeOperation = "lighter";
-              for (const asset of visible) {
-                ctx.globalAlpha = opacityAt(asset, t);
-                applyCanvasFilter(ctx, asset.filter);
-                if (asset.type === "image") {
-                  const image = images.get(asset.id);
-                  if (!image)
-                    throw new Error(`Missing image for ${asset.name}`);
-                  const fit = canvasFit(
-                    image.width,
-                    image.height,
-                    targetWidth,
-                    targetHeight,
-                    fitMode,
-                  );
-                  ctx.drawImage(
-                    image,
-                    fit.x,
-                    fit.y,
-                    fit.width,
-                    fit.height,
-                  );
-                } else {
-                  const sample = await frameFor(asset);
-                  const fit = canvasFit(
-                    sample.displayWidth,
-                    sample.displayHeight,
-                    targetWidth,
-                    targetHeight,
-                    fitMode,
-                  );
-                  sample.draw(ctx, fit.x, fit.y, fit.width, fit.height);
-                }
-              }
-              ctx.globalAlpha = 1;
-              ctx.filter = "none";
-              ctx.globalCompositeOperation = "source-over";
-              const sample = new VideoSample(canvas, {
-                timestamp: outTs,
-                duration: frameDuration,
-              });
-              try {
-                await videoSource.add(sample);
-              } finally {
-                sample.close();
-              }
-              composited++;
-            }
-          } finally {
-            decoded.forEach((sample) => sample.close());
+          const windowEnd = Math.min(length / rate, totalDuration - offset);
+          for (const asset of mediaAssets) {
+            if (asset.type !== "video" || !asset.hasAudio || asset.muted) continue;
+            const window = sourceWindow(asset);
+            await mixSource(asset.sourceId, asset.name, { sourceStart: window.start,
+              sourceEnd: Math.min(window.end, window.start + asset.duration),
+              timelineStart: asset.startTime - offset, timelineEnd: windowEnd }, true);
           }
-          if (i % 200 === 199 || i === totalFrames - 1) {
-            const seconds = (performance.now() - segmentStarted) / 1000;
-            addLog(
-              `Thread ${index + 1}: ${i + 1}/${totalFrames} fr | ${passed} passthrough | ${((i + 1) / seconds).toFixed(1)} fps`,
-            );
+          for (const track of audioTracks) {
+            await mixSource(track.sourceId, track.name, { sourceStart: 0, sourceEnd: track.duration,
+              timelineStart: track.startTime - offset, timelineEnd: windowEnd });
           }
-          if (i % 15 === 0) {
-            segmentProgress.current[index] = i / totalFrames;
-            setExportProgress(
-              ((segmentProgress.current[0] + segmentProgress.current[1]) /
-                2) *
-                70,
-            );
-            await new Promise((resolve) => setTimeout(resolve, 0));
-          }
-        }
-        videoSource.close();
-        await output.finalize();
-        finalized = true;
-        segmentProgress.current[index] = 1;
-        addLog(
-          `Thread ${index + 1} done: ${passed} passthrough / ${composited} composited frames`,
-        );
-        return new Uint8Array(output.target.buffer!);
-      } finally {
-        if (!finalized) await output.cancel().catch(() => {});
-        images.forEach((image) => image.close());
-        inputs.forEach((input) => input.dispose());
+          signal?.throwIfAborted();
+          rendering = offlineCtx.startRendering();
+          const batch = await rendering;
+          signal?.throwIfAborted();
+          const wav = audioBufferToWav(batch);
+          if (first === 0) mixed.set(wav.subarray(0, 44));
+          mixed.set(wav.subarray(44), 44 + first * 4);
+          onLog(`Audio mixed: ${Math.min(totalDuration, (first + length) / rate).toFixed(1)}s`);
+          await new Promise(resolve => setTimeout(resolve, 0));
+        } finally { await releaseAudio(); }
       }
+      const header = new DataView(mixed.buffer);
+      header.setUint32(4, 36 + frames * 4, true);
+      header.setUint32(40, frames * 4, true);
+      return mixed;
     };
+    const renderSegment = (start: number, end: number, index: number) =>
+      renderInWorker(snapshot, { targetWidth, targetHeight, videoBitrate, fps, frameDuration, fitMode }, start, end, index,
+        { ...context, setExportProgress: progress => {
+          segmentProgress.current[index] = progress;
+          setExportProgress(segmentProgress.current[0] + segmentProgress.current[1]);
+        } });
     const mid = Math.round((totalDuration / 2) * fps) / fps;
-    const cancellation = new AbortController();
+    const cancellation = resources;
     const run = async (work: () => Promise<Uint8Array>) => {
       try {
         return await work();
@@ -441,9 +225,9 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
     };
     // A failed branch cancels its siblings; settle their cleanup before a retry.
     const results = await Promise.allSettled([
-      run(() => renderSegment(0, mid, 0, cancellation.signal)),
-      run(() => renderSegment(mid, totalDuration, 1, cancellation.signal)),
-      run(() => mixAudio(cancellation.signal)),
+      run(() => renderSegment(0, mid, 0)),
+      run(() => renderSegment(mid, totalDuration, 1)),
+      run(() => mixAudio(cancellation.signal, resources, addLog)),
     ]);
     const [chunk1, chunk2, audioData] = results.map((result) => {
       if (result.status === "rejected") throw result.reason;
@@ -507,22 +291,24 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
     const masterBytes = (await ffmpegService.readFile(
       "master.mp4",
     )) as Uint8Array;
-    const b64 = await blobToBase64(
-      new Blob([masterBytes.buffer as ArrayBuffer], { type: "video/mp4" }),
-    );
-
     report({ phase: "muxing", videoBytes: masterBytes.byteLength });
     phase("saving");
+    const b64 = await blobToBase64(
+      new Blob([masterBytes.buffer as ArrayBuffer], { type: "video/mp4" }), resources.signal,
+    );
+
     setExportProgress(95);
     addLog(
       `Final payload: ${(b64.length / 1048576).toFixed(1)} MiB (base64)`,
     );
     try {
-      const saved = await Flow.save({
+      resources.signal.throwIfAborted();
+      context.beginDelivery();
+      const saved = await resources.wait(Flow.save({
         base64: b64,
         mimeType: "video/mp4",
-        name: "clipbraid_video.mp4",
-      });
+        name: "clipbraid_video.mp4", signal: resources.signal,
+      }));
       if (!saved)
         throw new Error("Save adapter rejected the video.");
       addLog("EXPORT COMPLETE: save adapter accepted the video");
@@ -532,7 +318,7 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
       );
     } catch (e) {
       throw new Error(
-        `Save rejected (${(masterBytes.byteLength / 1048576).toFixed(1)} MiB video): ${String(e)}`,
+        `Save not acknowledged (${(masterBytes.byteLength / 1048576).toFixed(1)} MiB video); delivery may have started: ${String(e)}`,
       );
     }
 

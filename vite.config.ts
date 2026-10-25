@@ -49,6 +49,18 @@ export default defineConfig(({ command, mode }) => {
   };
   return {
     plugins: [react(), tailwindcss(), isolation],
+    worker: {
+      format: "es",
+      rollupOptions: {
+        output: { entryFileNames: chunk => `assets/${chunk.name.replaceAll(".", "-")}-[hash].js` },
+      },
+      plugins: () => [{
+        name: "worker-module-isolation",
+        generateBundle(_options, bundle) {
+          assertProductModules(Object.values(bundle).flatMap(item => item.type === "chunk" ? Object.keys(item.modules) : []), projectRoot);
+        },
+      }],
+    },
     publicDir: false,
     define: { __DEV_AUTOMATION__: JSON.stringify(automation) },
     server: { headers: { 'Cross-Origin-Opener-Policy': 'same-origin' } },
