@@ -2,6 +2,8 @@ import React, { useEffect, useRef, memo } from "react";
 import { MediaAsset, VisualFilter } from "../types";
 interface MediaItemPreviewProps {
   asset: MediaAsset;
+  /** Resolved object URL for the immutable source; hidden while undefined. */
+  url: string | undefined;
   currentTime: number;
   isPlaying: boolean;
   fitMode: "contain" | "cover";
@@ -11,6 +13,7 @@ interface MediaItemPreviewProps {
 export const MediaItemPreview = memo(
   ({
     asset,
+    url,
     currentTime,
     isPlaying,
     fitMode,
@@ -90,8 +93,7 @@ export const MediaItemPreview = memo(
       filter: getFilterStyle(asset.filter),
       transition: "filter 0.3s ease-out",
     };
-    const url =
-      asset.blobUrl || `data:${asset.mimeType};base64,${asset.base64}`;
+    if (!url) return null;
     if (asset.type === "video") {
       return (
         <video

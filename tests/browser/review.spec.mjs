@@ -287,13 +287,16 @@ test("preview and encoded crossfades preserve brightness throughout the overlap"
     async ({ clips, render, filter }) => {
       const m = window.testRuntime.media,
         timeline = window.testRuntime.timeline;
-      for (const clip of clips)
-        clip.blobUrl = URL.createObjectURL(
+      for (const clip of clips) clip.sourceId = clip.id;
+      const clipBlobs = new Map(
+        clips.map((clip) => [
+          clip.id,
           new Blob(
             [Uint8Array.from(atob(clip.base64), (c) => c.charCodeAt(0))],
             { type: clip.mimeType },
           ),
-        );
+        ]),
+      );
       const opacityAt = timeline.createOpacitySampler(clips);
       const scope = {
         ...m,
@@ -306,7 +309,7 @@ test("preview and encoded crossfades preserve brightness throughout the overlap"
         fitMode: "cover",
         opacityAt,
         applyCanvasFilter: new Function(filter)(),
-        getBlob: async (url) => (await fetch(url)).blob(),
+        getBlob: async (sourceId) => clipBlobs.get(sourceId),
         addLog: () => {},
         segmentProgress: { current: [0, 0] },
         setExportProgress: () => {},
@@ -333,7 +336,6 @@ test("preview and encoded crossfades preserve brightness throughout the overlap"
         return pixels;
       } finally {
         input.dispose();
-        clips.forEach((c) => URL.revokeObjectURL(c.blobUrl));
       }
     },
     {

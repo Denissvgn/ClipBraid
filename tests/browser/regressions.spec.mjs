@@ -110,15 +110,14 @@ test("mixed PCM ends at clip trim", async ({ context }, info) => {
     async ({ clip, mix, wav }) => {
       const { media } = window.testRuntime;
       const bytes = Uint8Array.from(atob(clip.base64), (c) => c.charCodeAt(0));
-      clip.blobUrl = URL.createObjectURL(
-        new Blob([bytes], { type: clip.mimeType }),
-      );
+      clip.sourceId = "clip-source";
+      const clipBlob = new Blob([bytes], { type: clip.mimeType });
       const scope = {
         ...media,
         mediaAssets: [clip],
         audioTracks: [],
         totalDuration: 1,
-        getBlob: async (url) => (await fetch(url)).blob(),
+        getBlob: async () => clipBlob,
         audioBufferToWav: new Function(wav)(),
       };
       const fn = new Function(...Object.keys(scope), mix)(
@@ -234,12 +233,17 @@ test("contain margins clear after a landscape-to-portrait cut", async ({
   const result = await page.evaluate(
     async ({ clips, render, opacity, filter }) => {
       const m = window.testRuntime.media;
-      for (const c of clips)
-        c.blobUrl = URL.createObjectURL(
+      for (const c of clips) {
+        c.sourceId = c.id;
+      }
+      const clipBlobs = new Map(
+        clips.map((c) => [
+          c.id,
           new Blob([Uint8Array.from(atob(c.base64), (b) => b.charCodeAt(0))], {
             type: c.mimeType,
           }),
-        );
+        ]),
+      );
       const opacityAt = new Function(
         "createOpacitySampler",
         "mediaAssets",
@@ -256,7 +260,7 @@ test("contain margins clear after a landscape-to-portrait cut", async ({
         fitMode: "contain",
         opacityAt,
         applyCanvasFilter: new Function(filter)(),
-        getBlob: async (url) => (await fetch(url)).blob(),
+        getBlob: async (sourceId) => clipBlobs.get(sourceId),
         addLog: () => {},
         segmentProgress: { current: [0, 0] },
         setExportProgress: () => {},

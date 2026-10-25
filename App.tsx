@@ -6,7 +6,8 @@ import React, {
   useMemo,
 } from "react";
 import { Flow } from "./platform";
-import { parseProject } from "./services/project";
+import { parseProject, serializeProject } from "./services/project";
+import { MediaSourceStore, type SourceLease } from "./services/mediaSources";
 import {
   projectDuration,
   createOpacitySampler,
@@ -69,17 +70,15 @@ const base64ToUint8Array = (base64: string): Uint8Array<ArrayBuffer> => {
  *  (deduced from packet timestamps, not unreliable metadata) + native size
  *  (source metadata only; originals are never replaced). */
 const probeVideoSource = async (
-  blobUrl: string,
+  bytes: Blob,
 ): Promise<{
   hasAudio: boolean;
   fps: number;
   width: number;
   height: number;
 }> => {
-  const response = await fetch(blobUrl);
-  if (!response.ok) throw new Error("Cannot read the video source.");
   const input = new Input({
-    source: new BlobSource(await response.blob()),
+    source: new BlobSource(bytes),
     formats: ALL_FORMATS,
   });
   try {
@@ -133,10 +132,10 @@ const probeDuration = (
     element.src = blobUrl;
   });
 };
-const createBlobUrl = (base64: string, mimeType: string) => {
+const base64ToBlob = (base64: string, mimeType: string): Blob => {
   const bytes = base64ToUint8Array(base64);
   if (!bytes.length) throw new Error("Empty media data.");
-  return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+  return new Blob([bytes], { type: mimeType });
 };
 const blobToBase64 = (blob: Blob): Promise<string> => {
   return new Promise((resolve, reject) => {
@@ -233,6 +232,15 @@ export default function App() {
     audioTracks: [],
   });
 
+  // Media ownership: immutable originals and every object URL live in this
+  // store; state holds clip instances that reference sources by ID.
+  const storeRef = useRef<MediaSourceStore | null>(null);
+  if (!storeRef.current) storeRef.current = new MediaSourceStore();
+  const sourceUrl = useCallback(
+    (sourceId: string) => storeRef.current!.urlFor(sourceId),
+    [],
+  );
+
   useEffect(() => {
     cleanupRef.current = { mediaAssets, audioTracks };
   }, [mediaAssets, audioTracks]);
@@ -268,11 +276,17 @@ export default function App() {
         setErrorDetail(`FFmpeg failed to load: ${err.message}`);
       });
   }, [addLog]);
+  // The pin-sync effect owns source release: commits pre-pin additions so URLs
+  // exist at first render, and unreferenced sources are released only after
+  // the state that drops them has committed — never while a job lease is open.
+  useEffect(() => {
+    storeRef.current!.syncPins(
+      [...mediaAssets, ...audioTracks].map((item) => item.sourceId),
+    );
+  }, [mediaAssets, audioTracks]);
   useEffect(() => {
     return () => {
-      const { mediaAssets: m, audioTracks: a } = cleanupRef.current;
-      m.forEach((asset) => asset.blobUrl && URL.revokeObjectURL(asset.blobUrl));
-      a.forEach((track) => track.blobUrl && URL.revokeObjectURL(track.blobUrl));
+      storeRef.current!.clear();
     };
   }, []);
   const totalDuration = useMemo(
@@ -325,92 +339,107 @@ export default function App() {
     [transitionDuration, clampTransition],
   );
   const handleImportMedia = async () => {
-    let stagedUrl: string | undefined;
+    const staged: string[] = [];
     try {
       const selected = await Flow.media.select({ filter: "all" });
       if (!selected) return;
       setStatus("PROBING MEDIA...");
       if (selected.type !== "image" && selected.type !== "video")
         throw new Error("Choose a video or image.");
-      const bUrl = (stagedUrl = createBlobUrl(
-        selected.base64,
-        selected.mimeType,
-      ));
-      const dur = await probeDuration(bUrl, selected.type);
-      const {
-        hasAudio,
-        fps: sourceFps,
-        width: sourceWidth,
-        height: sourceHeight,
-      } = selected.type === "video"
-        ? await probeVideoSource(bUrl)
-        : { hasAudio: false, fps: 0, width: 0, height: 0 };
-      const newAssetBase: MediaAsset = {
-        id: crypto.randomUUID(),
-        mediaId: selected.mediaId,
-        base64: selected.base64,
-        mimeType: selected.mimeType,
-        type: selected.type as "image" | "video",
-        name: selected.name,
-        duration: dur,
-        originalDuration: dur,
-        trimStart: 0,
-        trimEnd: 0,
-        filter: "none",
-        startTime: 0,
-        blobUrl: bUrl,
-        hasAudio,
-        muted: false,
-        sourceFps: sourceFps || undefined,
-        sourceWidth: sourceWidth || undefined,
-        sourceHeight: sourceHeight || undefined,
-      };
-      setMediaAssets((prev) => {
-        const last = prev[prev.length - 1];
-        const trans = last
-          ? clampTransition(transitionDuration, last.duration, dur)
-          : 0;
-        const start = last
-          ? Math.max(0, last.startTime + last.duration - trans)
-          : 0;
-        return [
-          ...prev,
-          { ...newAssetBase, startTime: start, transitionDuration: trans },
-        ];
-      });
-      sysLog(
-        "import",
-        `Clip: ${selected.name} (${selected.type}, ${dur.toFixed(1)}s${sourceFps ? `, ${Number(sourceFps.toFixed(3))}fps` : ""}${sourceWidth ? `, ${sourceWidth}x${sourceHeight}` : ""})`,
-      );
-      setStatus("READY");
+      // Host transport delivers base64; the store holds Blob originals.
+      const [asset] = await storeRef.current!.stage([
+        { bytes: base64ToBlob(selected.base64, selected.mimeType), mimeType: selected.mimeType },
+      ]);
+      staged.push(asset.sourceId);
+      const probeLease = storeRef.current!.acquire(asset.sourceId, "import-probe");
+      try {
+        const dur = await probeDuration(probeLease.url, selected.type);
+        const {
+          hasAudio,
+          fps: sourceFps,
+          width: sourceWidth,
+          height: sourceHeight,
+        } = selected.type === "video"
+          ? await probeVideoSource(asset.bytes)
+          : { hasAudio: false, fps: 0, width: 0, height: 0 };
+        const newAssetBase: MediaAsset = {
+          id: crypto.randomUUID(),
+          mediaId: selected.mediaId,
+          sourceId: asset.sourceId,
+          mimeType: selected.mimeType,
+          type: selected.type as "image" | "video",
+          name: selected.name,
+          duration: dur,
+          originalDuration: dur,
+          trimStart: 0,
+          trimEnd: 0,
+          filter: "none",
+          startTime: 0,
+          hasAudio,
+          muted: false,
+          sourceFps: sourceFps || undefined,
+          sourceWidth: sourceWidth || undefined,
+          sourceHeight: sourceHeight || undefined,
+        };
+        storeRef.current!.pin(asset.sourceId);
+        setMediaAssets((prev) => {
+          const last = prev[prev.length - 1];
+          const trans = last
+            ? clampTransition(transitionDuration, last.duration, dur)
+            : 0;
+          const start = last
+            ? Math.max(0, last.startTime + last.duration - trans)
+            : 0;
+          return [
+            ...prev,
+            { ...newAssetBase, startTime: start, transitionDuration: trans },
+          ];
+        });
+        sysLog(
+          "import",
+          `Clip: ${selected.name} (${selected.type}, ${dur.toFixed(1)}s${sourceFps ? `, ${Number(sourceFps.toFixed(3))}fps` : ""}${sourceWidth ? `, ${sourceWidth}x${sourceHeight}` : ""})`,
+        );
+        setStatus("READY");
+      } finally {
+        probeLease.release();
+      }
     } catch (err) {
-      if (stagedUrl) URL.revokeObjectURL(stagedUrl);
+      staged.forEach((sourceId) => storeRef.current!.remove(sourceId));
       setStatus("IMPORT ERROR");
       sysLog("error", `Clip import failed: ${String(err).slice(0, 120)}`);
     }
   };
   const handleImportGalleryAudio = async () => {
-    let stagedUrl: string | undefined;
+    const staged: string[] = [];
     try {
       const selected = await Flow.media.select({ filter: "audio" });
       if (!selected) return;
       setStatus("LOADING AUDIO...");
-      const bUrl = (stagedUrl = createBlobUrl(
-        selected.base64,
-        selected.mimeType,
-      ));
-      const duration = await probeDuration(bUrl, "audio");
+      const [asset] = await storeRef.current!.stage([
+        {
+          bytes: base64ToBlob(selected.base64, selected.mimeType),
+          mimeType: selected.mimeType,
+        },
+      ]);
+      staged.push(asset.sourceId);
+      const probeLease = storeRef.current!.acquire(asset.sourceId, "import-probe");
+      let duration: number;
+      try {
+        duration = await probeDuration(probeLease.url, "audio");
+      } finally {
+        probeLease.release();
+      }
+      storeRef.current!.pin(asset.sourceId);
       setAudioTracks((prev) => [
         ...prev,
         {
           id: crypto.randomUUID(),
           mediaId: selected.mediaId,
-          base64: selected.base64,
+          sourceId: asset.sourceId,
           mimeType: selected.mimeType,
           name: selected.name,
           startTime: currentTime,
           duration,
-          blobUrl: bUrl,
         },
       ]);
       sysLog(
@@ -419,7 +448,7 @@ export default function App() {
       );
       setStatus("READY");
     } catch (err) {
-      if (stagedUrl) URL.revokeObjectURL(stagedUrl);
+      staged.forEach((sourceId) => storeRef.current!.remove(sourceId));
       setStatus("AUDIO ERROR");
       sysLog("error", `Audio import failed: ${String(err).slice(0, 120)}`);
     }
@@ -430,26 +459,38 @@ export default function App() {
     const files = Array.from(event.target.files || []);
     if (!files.length) return;
     const startTime = currentTime;
+    const stagedIds: string[] = [];
     const staged: AudioFragment[] = [];
-    const urls: string[] = [];
     setStatus("IMPORTING AUDIO...");
     try {
-      for (const file of files) {
-        const blobUrl = URL.createObjectURL(file);
-        urls.push(blobUrl);
-        const duration = await probeDuration(blobUrl, "audio");
-        const base64 = await blobToBase64(file);
+      // One batch: identical files share a single immutable source.
+      const assets = await storeRef.current!.stage(
+        files.map((file) => ({ bytes: file, mimeType: file.type })),
+      );
+      stagedIds.push(...new Set(assets.map((asset) => asset.sourceId)));
+      for (const [index, file] of files.entries()) {
+        const asset = assets[index];
+        const probeLease = storeRef.current!.acquire(
+          asset.sourceId,
+          "import-probe",
+        );
+        let duration: number;
+        try {
+          duration = await probeDuration(probeLease.url, "audio");
+        } finally {
+          probeLease.release();
+        }
         staged.push({
           id: crypto.randomUUID(),
           mediaId: "",
-          base64,
+          sourceId: asset.sourceId,
           mimeType: file.type,
           name: file.name,
           startTime,
           duration,
-          blobUrl,
         });
       }
+      stagedIds.forEach((sourceId) => storeRef.current!.pin(sourceId));
       setAudioTracks((previous) => [...previous, ...staged]);
       sysLog(
         "import",
@@ -457,7 +498,7 @@ export default function App() {
       );
       setStatus("READY");
     } catch (error) {
-      urls.forEach((url) => URL.revokeObjectURL(url));
+      stagedIds.forEach((sourceId) => storeRef.current!.remove(sourceId));
       setStatus("AUDIO ERROR");
       sysLog("error", `Audio import failed: ${String(error).slice(0, 120)}`);
     } finally {
@@ -473,19 +514,24 @@ export default function App() {
       const audio = await Flow.microphone.record({
         durationMs: recDuration * 1000,
       });
-      const bUrl = createBlobUrl(audio.base64, audio.mimeType);
+      const [asset] = await storeRef.current!.stage([
+        {
+          bytes: base64ToBlob(audio.base64, audio.mimeType),
+          mimeType: audio.mimeType,
+        },
+      ]);
+      storeRef.current!.pin(asset.sourceId);
       const timeStr = new Date().toLocaleTimeString("en-US", { hour12: false });
       setAudioTracks((prev) => [
         ...prev,
         {
           id: crypto.randomUUID(),
           mediaId: "",
-          base64: audio.base64,
+          sourceId: asset.sourceId,
           mimeType: audio.mimeType,
           name: `VOICE_${timeStr}`,
           startTime: currentTime,
           duration: audio.durationMs / 1000,
-          blobUrl: bUrl,
         },
       ]);
       setStatus("READY");
@@ -557,9 +603,6 @@ export default function App() {
   const handleDeleteMedia = useCallback(
     (id: string) => {
       const asset = cleanupRef.current.mediaAssets.find((m) => m.id === id);
-      if (asset?.blobUrl) {
-        URL.revokeObjectURL(asset.blobUrl);
-      }
       if (asset) logEvent("info", `Clip removed: ${asset.name}`);
       if (selectedAssetId === id) setSelectedAssetId(null);
       setMediaAssets((prev) => {
@@ -570,9 +613,6 @@ export default function App() {
   );
   const handleDeleteAudio = useCallback((id: string) => {
     const track = cleanupRef.current.audioTracks.find((t) => t.id === id);
-    if (track?.blobUrl) {
-      URL.revokeObjectURL(track.blobUrl);
-    }
     if (track) logEvent("info", `Audio track removed: ${track.name}`);
     setAudioTracks((prev) => prev.filter((t) => t.id !== id));
   }, []);
@@ -624,16 +664,23 @@ export default function App() {
   const handleSaveProject = async () => {
     setStatus("SAVING PROJECT...");
     try {
-      const data = {
-        schemaVersion: 1,
-        mediaAssets: mediaAssets.map(({ blobUrl, ...rest }) => rest),
-        audioTracks: audioTracks.map(({ blobUrl, ...rest }) => rest),
-        aspectRatio,
-        fitMode,
-        transitionDuration,
-        currentTime,
-      };
-      const blob = new Blob([JSON.stringify(data)], {
+      // One consistent snapshot; base64 appears only at this transport boundary.
+      const json = await serializeProject(
+        {
+          mediaAssets,
+          audioTracks,
+          aspectRatio,
+          fitMode,
+          transitionDuration,
+          currentTime,
+        },
+        async (sourceId) => {
+          const bytes = storeRef.current!.bytesFor(sourceId);
+          if (!bytes) throw new Error("Missing media source.");
+          return blobToBase64(bytes);
+        },
+      );
+      const blob = new Blob([json], {
         type: "application/json",
       });
       const reader = new FileReader();
@@ -667,18 +714,32 @@ export default function App() {
   };
   const loadProjectText = async (text: string): Promise<boolean> => {
     setStatus("LOADING PROJECT...");
-    const stagedUrls: string[] = [];
+    const stagedIds: string[] = [];
     try {
       const data = parseProject(text);
-      const restore = <T extends { base64: string; mimeType: string }>(
-        asset: T,
-      ) => {
-        const blobUrl = createBlobUrl(asset.base64, asset.mimeType);
-        stagedUrls.push(blobUrl);
-        return { ...asset, blobUrl };
-      };
-      const restoredMedia = data.mediaAssets.map(restore);
-      const restoredAudio = data.audioTracks.map(restore);
+      // Stage and validate every source before touching live state; identical
+      // payloads share one immutable original. No URL exists until commit.
+      const staged = await storeRef.current!.stage(
+        data.sources.map((source) => ({
+          bytes: base64ToBlob(source.base64, source.mimeType),
+          mimeType: source.mimeType,
+        })),
+      );
+      stagedIds.push(...new Set(staged.map((asset) => asset.sourceId)));
+      const idMap = new Map(
+        data.sources.map((source, index) => [
+          source.sourceId,
+          staged[index].sourceId,
+        ]),
+      );
+      const restoredMedia = data.mediaAssets.map((clip) => ({
+        ...clip,
+        sourceId: idMap.get(clip.sourceId)!,
+      }));
+      const restoredAudio = data.audioTracks.map((track) => ({
+        ...track,
+        sourceId: idMap.get(track.sourceId)!,
+      }));
       const restoredTime = Math.max(
         0,
         Math.min(
@@ -686,7 +747,9 @@ export default function App() {
           projectDuration(restoredMedia, restoredAudio),
         ),
       );
-      const previous = cleanupRef.current;
+      // Pre-pin so URLs exist at the first render of the committed state; the
+      // pin-sync effect releases the replaced project's sources afterwards.
+      stagedIds.forEach((sourceId) => storeRef.current!.pin(sourceId));
       setIsPlaying(false);
       setSelectedAssetId(null);
       setMediaAssets(restoredMedia);
@@ -700,12 +763,6 @@ export default function App() {
         mediaAssets: restoredMedia,
         audioTracks: restoredAudio,
       };
-      previous.mediaAssets.forEach(
-        (asset) => asset.blobUrl && URL.revokeObjectURL(asset.blobUrl),
-      );
-      previous.audioTracks.forEach(
-        (track) => track.blobUrl && URL.revokeObjectURL(track.blobUrl),
-      );
       sysLog(
         "import",
         `Project loaded: ${restoredMedia.length} clips, ${restoredAudio.length} audio tracks`,
@@ -713,7 +770,7 @@ export default function App() {
       setStatus("READY");
       return true;
     } catch (err) {
-      stagedUrls.forEach((url) => URL.revokeObjectURL(url));
+      stagedIds.forEach((sourceId) => storeRef.current!.remove(sourceId));
       setStatus("LOAD ERROR");
       sysLog("error", `Project load failed: ${String(err).slice(0, 120)}`);
       return false;
@@ -811,7 +868,16 @@ export default function App() {
     segmentProgress.current = [0, 0];
     exportStartTimeRef.current = performance.now();
 
+    // Hold every original for the job's lifetime: replacing or deleting the
+    // project cannot revoke media an active export still reads.
+    const jobLeases: SourceLease[] = [];
     try {
+      jobLeases.push(
+        ...storeRef.current!.acquireAll(
+          [...mediaAssets, ...audioTracks].map((item) => item.sourceId),
+          "export",
+        ),
+      );
       addLog("EXPORT STARTED");
       setIsPlaying(false);
       await ffmpegService.load();
@@ -837,27 +903,24 @@ export default function App() {
         targetHeight = baseRes;
       }
       // --- T1: render at the sources' frame rate (no duplicated frames) ---
-      // Blobs are fetched once per export and shared by the fps probe,
-      // the segment renderers and the audio mix.
-      const blobByUrl = new Map<string, Blob>();
-      const getBlob = async (url: string | undefined): Promise<Blob> => {
-        if (!url) throw new Error("missing media URL");
-        if (!blobByUrl.has(url)) {
-          const response = await fetch(url);
-          if (!response.ok) throw new Error("Cannot read export source.");
-          blobByUrl.set(url, await response.blob());
-        }
-        return blobByUrl.get(url)!;
+      // Original bytes are read through the source store; job leases keep
+      // them alive for the whole export, so no URL fetch is needed here.
+      const getBlob = async (sourceId: string | undefined): Promise<Blob> => {
+        const bytes = sourceId
+          ? storeRef.current!.bytesFor(sourceId)
+          : undefined;
+        if (!bytes) throw new Error("missing media source");
+        return bytes;
       };
       let maxSourceFps = 0;
       for (const asset of mediaAssets) {
         if (asset.type !== "video") continue;
         let f = asset.sourceFps || 0;
-        if (!f && asset.blobUrl) {
+        if (!f) {
           // Legacy drafts predate sourceFps — probe cheaply from packet timestamps.
           try {
             const input = new Input({
-              source: new BlobSource(await getBlob(asset.blobUrl)),
+              source: new BlobSource(await getBlob(asset.sourceId)),
               formats: ALL_FORMATS,
             });
             try {
@@ -907,7 +970,7 @@ export default function App() {
           if (asset.type !== "video" || !asset.hasAudio || asset.muted)
             continue;
           const input = new Input({
-            source: new BlobSource(await getBlob(asset.blobUrl)),
+            source: new BlobSource(await getBlob(asset.sourceId)),
             formats: ALL_FORMATS,
           });
           try {
@@ -949,7 +1012,7 @@ export default function App() {
           signal?.throwIfAborted();
           try {
             const buffer = await offlineCtx.decodeAudioData(
-              await (await getBlob(track.blobUrl)).arrayBuffer(),
+              await (await getBlob(track.sourceId)).arrayBuffer(),
             );
             const source = offlineCtx.createBufferSource();
             source.buffer = buffer;
@@ -1002,7 +1065,7 @@ export default function App() {
           for (const asset of relevantAssets) {
             signal?.throwIfAborted();
             try {
-              const blob = await getBlob(asset.blobUrl);
+              const blob = await getBlob(asset.sourceId);
               if (asset.type === "image") {
                 images.set(asset.id, await createImageBitmap(blob));
               } else {
@@ -1308,6 +1371,7 @@ export default function App() {
           /* already gone or worker reset */
         }
       }
+      jobLeases.forEach((lease) => lease.release());
       setIsExporting(false);
     }
   };
@@ -1339,6 +1403,7 @@ export default function App() {
       <AudioEngine
         audioTracks={audioTracks}
         mediaAssets={mediaAssets}
+        sourceUrl={sourceUrl}
         currentTime={currentTime}
         isPlaying={isPlaying}
       />
@@ -1453,6 +1518,7 @@ export default function App() {
           <div className="preview-stage">
             <MediaPreview
               mediaAssets={mediaAssets}
+              sourceUrl={sourceUrl}
               currentTime={currentTime}
               isPlaying={isPlaying}
               aspectRatio={aspectRatio}

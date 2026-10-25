@@ -5,6 +5,8 @@ import { Icon } from "./Icon";
 import { createOpacitySampler } from "../services/timeline";
 interface MediaPreviewProps {
   mediaAssets: MediaAsset[];
+  /** Resolves a source ID to its live object URL (media source store). */
+  sourceUrl: (sourceId: string) => string | undefined;
   currentTime: number;
   isPlaying: boolean;
   aspectRatio: "16:9" | "9:16" | "1:1";
@@ -13,6 +15,7 @@ interface MediaPreviewProps {
 }
 export const MediaPreview: React.FC<MediaPreviewProps> = ({
   mediaAssets,
+  sourceUrl,
   currentTime,
   isPlaying,
   aspectRatio,
@@ -65,6 +68,7 @@ export const MediaPreview: React.FC<MediaPreviewProps> = ({
             <MediaItemPreview
               key={asset.id}
               asset={asset}
+              url={sourceUrl(asset.sourceId)}
               currentTime={currentTime}
               isPlaying={isPlaying}
               fitMode={fitMode}

@@ -3,6 +3,8 @@ import { AudioFragment, MediaAsset } from "../types";
 interface AudioEngineProps {
   audioTracks: AudioFragment[];
   mediaAssets: MediaAsset[];
+  /** Resolves a source ID to its live object URL (media source store). */
+  sourceUrl: (sourceId: string) => string | undefined;
   currentTime: number;
   isPlaying: boolean;
 }
@@ -10,6 +12,7 @@ export const AudioEngine = memo(
   ({
     audioTracks = [],
     mediaAssets = [],
+    sourceUrl,
     currentTime = 0,
     isPlaying = false,
   }: AudioEngineProps) => {
@@ -27,7 +30,7 @@ export const AudioEngine = memo(
       const desiredUrls = new Map(
         [...audioTracks, ...mediaAssets].map((asset) => [
           asset.id,
-          asset.blobUrl || `data:${asset.mimeType};base64,${asset.base64}`,
+          sourceUrl(asset.sourceId),
         ]),
       );
       for (const [id, audio] of audioRefs.current.entries()) {
@@ -39,9 +42,8 @@ export const AudioEngine = memo(
       }
       // Load soundrack audio
       for (const track of audioTracks) {
-        if (!audioRefs.current.has(track.id)) {
-          const url =
-            track.blobUrl || `data:${track.mimeType};base64,${track.base64}`;
+        const url = desiredUrls.get(track.id);
+        if (url && !audioRefs.current.has(track.id)) {
           const audio = new Audio(url);
           audio.loop = false;
           audio.preload = "auto";
@@ -51,9 +53,8 @@ export const AudioEngine = memo(
       // Load video clip audio
       for (const asset of mediaAssets) {
         if (asset.type === "video" && asset.hasAudio && !asset.muted) {
-          if (!audioRefs.current.has(asset.id)) {
-            const url =
-              asset.blobUrl || `data:${asset.mimeType};base64,${asset.base64}`;
+          const url = desiredUrls.get(asset.id);
+          if (url && !audioRefs.current.has(asset.id)) {
             const audio = new Audio(url);
             audio.loop = false;
             audio.preload = "auto";

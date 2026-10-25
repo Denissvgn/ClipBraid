@@ -1,0 +1,287 @@
+/**
+ * Explicit media ownership (D02).
+ *
+ * A source asset is the immutable original bytes of one imported or restored
+ * file. Timeline clips and soundtrack entries are *instances* that reference a
+ * source by `sourceId` and keep their own edit state (trims, placement,
+ * filters, mute), so repeated use of one source never couples two clips'
+ * edits. Optional derived media (proxies, future renders) hang off a source
+ * under a settings key and are dropped with it; originals stay authoritative.
+ *
+ * Every object URL in the application is created and revoked through this
+ * module. Consumers hold explicit references — `acquire` leases for running
+ * jobs and `syncPins` for the live project — and a URL is revoked only when
+ * its last reference is gone. Deleting or replacing a project therefore can
+ * never revoke media that an active job still needs. Bytes are kept as Blob
+ * handles; base64 exists only at serialization/transport boundaries.
+ */
+
+export interface SourceAsset {
+  sourceId: string;
+  /** Never rewritten in place; a changed rendition gets a new revision. */
+  revision: number;
+  mimeType: string;
+  byteLength: number;
+  /** SHA-256 of the original bytes; identity and preservation evidence. */
+  sha256: string;
+  bytes: Blob;
+}
+
+export interface SourceLease {
+  readonly sourceId: string;
+  readonly url: string;
+  /** Idempotent; drops one reference held by the acquiring job. */
+  release(): void;
+}
+
+export interface DerivedMedia {
+  /** Cache key, e.g. `proxy:720p:30`; combined with the source revision. */
+  key: string;
+  mimeType: string;
+  bytes: Blob;
+}
+
+export interface UrlApi {
+  createObjectURL(blob: Blob): string;
+  revokeObjectURL(url: string): void;
+}
+
+interface Entry {
+  asset: SourceAsset;
+  url: string | null;
+  refs: number;
+  disposed: boolean;
+  derived: Map<string, DerivedMedia>;
+}
+
+const defaultUrlApi: UrlApi = {
+  createObjectURL: (blob) => URL.createObjectURL(blob),
+  revokeObjectURL: (url) => URL.revokeObjectURL(url),
+};
+export class MediaSourceStore {
+  private entries = new Map<string, Entry>();
+  private pinned = new Set<string>();
+  private counter = 0;
+  private readonly urlApi: UrlApi;
+
+  constructor(urlApi: UrlApi = defaultUrlApi) {
+    this.urlApi = urlApi;
+  }
+
+  /**
+   * Stage immutable originals before anything references them. Identical
+   * bytes staged in one batch share one source so repeated clips in a project
+   * do not duplicate runtime bytes or URLs. A failure disposes the whole
+   * batch; nothing becomes visible half-staged.
+   */
+  async stage(
+    items: { bytes: Blob; mimeType: string }[],
+  ): Promise<SourceAsset[]> {
+    const stagedIds: string[] = [];
+    const byChecksum = new Map<string, SourceAsset>();
+    try {
+      const out: SourceAsset[] = [];
+      for (const item of items) {
+        if (!item.bytes || item.bytes.size === 0)
+          throw new Error("Empty media data.");
+        const sha256 = await sourceChecksum(item.bytes);
+        const shared = byChecksum.get(sha256);
+        if (shared) {
+          out.push(shared);
+          continue;
+        }
+        const sourceId = `src-${++this.counter}`;
+        const asset: SourceAsset = {
+          sourceId,
+          revision: 1,
+          mimeType: item.mimeType,
+          byteLength: item.bytes.size,
+          sha256,
+          bytes: item.bytes,
+        };
+        this.entries.set(sourceId, {
+          asset,
+          url: null,
+          refs: 0,
+          disposed: false,
+          derived: new Map(),
+        });
+        stagedIds.push(sourceId);
+        byChecksum.set(sha256, asset);
+        out.push(asset);
+      }
+      return out;
+    } catch (error) {
+      for (const sourceId of stagedIds) this.remove(sourceId);
+      throw error;
+    }
+  }
+
+  get(sourceId: string): SourceAsset | undefined {
+    return this.entries.get(sourceId)?.asset;
+  }
+
+  bytesFor(sourceId: string): Blob | undefined {
+    return this.get(sourceId)?.bytes;
+  }
+
+  /**
+   * Acquire a job lease. The source URL is created on the first reference and
+   * survives `syncPins`, `remove` and `clear` while any lease is open.
+   */
+  acquire(sourceId: string, purpose = "job"): SourceLease {
+    const entry = this.entries.get(sourceId);
+    if (!entry || entry.disposed)
+      throw new Error(`Unknown media source: ${sourceId}`);
+    this.retain(entry);
+    let released = false;
+    return {
+      sourceId,
+      url: entry.url!,
+      release: () => {
+        if (released) return;
+        released = true;
+        this.release(entry, purpose);
+      },
+    };
+  }
+  /** Acquire one lease per unique source for a multi-source job. */
+  acquireAll(sourceIds: Iterable<string>, purpose = "job"): SourceLease[] {
+    const leases: SourceLease[] = [];
+    try {
+      for (const sourceId of new Set(sourceIds))
+        leases.push(this.acquire(sourceId, purpose));
+      return leases;
+    } catch (error) {
+      for (const lease of leases) lease.release();
+      throw error;
+    }
+  }
+
+  /** Reference a source on behalf of the live project before commit. */
+  pin(sourceId: string): void {
+    const entry = this.entries.get(sourceId);
+    if (!entry || entry.disposed)
+      throw new Error(`Unknown media source: ${sourceId}`);
+    this.pinned.add(sourceId);
+    this.retain(entry);
+  }
+
+  /**
+   * Make the pinned set exactly `sourceIds`. New sources are retained before
+   * old ones are released so a swap can never drop a URL early. Sources the
+   * project no longer references are retired: their URL and bytes are freed
+   * with the last reference, which defers to any open job lease.
+   */
+  syncPins(sourceIds: Iterable<string>): void {
+    const target = new Set(sourceIds);
+    for (const sourceId of target)
+      if (!this.pinned.has(sourceId)) this.pin(sourceId);
+    for (const sourceId of [...this.pinned])
+      if (!target.has(sourceId)) {
+        this.pinned.delete(sourceId);
+        const entry = this.entries.get(sourceId);
+        if (!entry) continue;
+        entry.disposed = true;
+        this.release(entry, "pin");
+      }
+  }
+
+  /**
+   * Dispose a source (staging rollback or explicit deletion). The pinned
+   * reference is dropped; open leases keep the bytes until their release.
+   */
+  remove(sourceId: string): void {
+    const entry = this.entries.get(sourceId);
+    if (!entry) return;
+    const wasPinned = this.pinned.delete(sourceId);
+    entry.disposed = true;
+    if (wasPinned) this.release(entry, "pin");
+    else if (entry.refs === 0) this.purge(entry);
+  }
+
+  /** Dispose everything (project teardown); open leases still defer purge. */
+  clear(): void {
+    for (const sourceId of [...this.entries.keys()]) this.remove(sourceId);
+    this.pinned.clear();
+  }
+
+  urlFor(sourceId: string): string | undefined {
+    return this.entries.get(sourceId)?.url ?? undefined;
+  }
+
+
+
+  /** Optional derived renditions; dropped with their source, never authoritative. */
+  attachDerived(sourceId: string, derived: DerivedMedia): void {
+    const entry = this.entries.get(sourceId);
+    if (!entry || entry.disposed)
+      throw new Error(`Unknown media source: ${sourceId}`);
+    entry.derived.set(derived.key, derived);
+  }
+
+  derivedFor(sourceId: string, key: string): DerivedMedia | undefined {
+    return this.entries.get(sourceId)?.derived.get(key);
+  }
+
+  dropDerived(sourceId: string, key?: string): void {
+    const entry = this.entries.get(sourceId);
+    if (!entry) return;
+    if (key === undefined) entry.derived.clear();
+    else entry.derived.delete(key);
+  }
+
+  /** Deterministic observability for tests and diagnostics. */
+  snapshot() {
+    return {
+      sources: [...this.entries.values()].map((entry) => ({
+        sourceId: entry.asset.sourceId,
+        revision: entry.asset.revision,
+        mimeType: entry.asset.mimeType,
+        byteLength: entry.asset.byteLength,
+        sha256: entry.asset.sha256,
+        refs: entry.refs,
+        disposed: entry.disposed,
+        hasUrl: entry.url !== null,
+        derived: [...entry.derived.keys()],
+      })),
+      pinned: [...this.pinned].sort(),
+    };
+  }
+
+  private retain(entry: Entry): void {
+    entry.refs += 1;
+    if (entry.url === null)
+      entry.url = this.urlApi.createObjectURL(entry.asset.bytes);
+  }
+
+  private release(entry: Entry, _purpose: string): void {
+    entry.refs = Math.max(0, entry.refs - 1);
+    if (entry.refs > 0) return;
+    if (entry.url !== null) {
+      this.urlApi.revokeObjectURL(entry.url);
+      entry.url = null;
+    }
+    if (entry.disposed) this.purge(entry);
+  }
+
+  private purge(entry: Entry): void {
+    if (entry.url !== null) {
+      this.urlApi.revokeObjectURL(entry.url);
+      entry.url = null;
+    }
+    entry.derived.clear();
+    this.entries.delete(entry.asset.sourceId);
+    this.pinned.delete(entry.asset.sourceId);
+  }
+}
+
+export async function sourceChecksum(bytes: Blob): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    await bytes.arrayBuffer(),
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
