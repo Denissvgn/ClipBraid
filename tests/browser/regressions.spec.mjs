@@ -300,3 +300,101 @@ test("contain margins clear after a landscape-to-portrait cut", async ({
   });
   expect(Math.max(...result.margin.slice(0, 3))).toBeLessThan(15);
 });
+
+test("parallel segment canvases render black before, between and after clips", async ({
+  context,
+}, info) => {
+  const page = await openProbe(context);
+  const clips = [
+    await asset("landscape-red.png", { startTime: 0.1, duration: 0.1 }),
+    await asset("portrait-blue.png", {
+      id: "visual-2",
+      startTime: 0.6,
+      duration: 0.1,
+    }),
+  ];
+  const pixels = await page.evaluate(
+    async ({ clips, render, opacity, filter }) => {
+      const m = window.testRuntime.media;
+      for (const clip of clips) clip.sourceId = clip.id;
+      const clipBlobs = new Map(
+        clips.map((clip) => [
+          clip.id,
+          new Blob(
+            [Uint8Array.from(atob(clip.base64), (c) => c.charCodeAt(0))],
+            { type: clip.mimeType },
+          ),
+        ]),
+      );
+      const opacityAt = new Function(
+        "createOpacitySampler",
+        "mediaAssets",
+        opacity,
+      )(window.testRuntime.timeline.createOpacitySampler, clips);
+      const scope = {
+        ...m,
+        mediaAssets: clips,
+        targetWidth: 160,
+        targetHeight: 90,
+        videoBitrate: 1000000,
+        fps: 30,
+        frameDuration: 1 / 30,
+        fitMode: "contain",
+        opacityAt,
+        applyCanvasFilter: new Function(filter)(),
+        getBlob: async (sourceId) => clipBlobs.get(sourceId),
+        addLog: () => {},
+        segmentProgress: { current: [0, 0] },
+        setExportProgress: () => {},
+      };
+      const renderSegment = new Function(...Object.keys(scope), render)(
+        ...Object.values(scope),
+      );
+      const readSegment = async (start, end, index) => {
+        const bytes = await renderSegment(start, end, index);
+        const input = new m.Input({
+          source: new m.BlobSource(new Blob([bytes])),
+          formats: m.ALL_FORMATS,
+        });
+        try {
+          const sink = new m.VideoSampleSink(await input.getPrimaryVideoTrack());
+          const canvas = new OffscreenCanvas(160, 90);
+          const ctx = canvas.getContext("2d");
+          const pixels = [];
+          for (const time of [0.05, 0.15, 0.35]) {
+            const sample = await sink.getSample(time);
+            sample.draw(ctx, 0, 0, 160, 90);
+            sample.close();
+            pixels.push([...ctx.getImageData(80, 45, 1, 1).data]);
+          }
+          return pixels;
+        } finally {
+          input.dispose();
+        }
+      };
+      return {
+        first: await readSegment(0, 0.5, 0),
+        second: await readSegment(0.5, 1, 1),
+      };
+    },
+    {
+      clips,
+      render: expression("App.tsx", "renderSegment"),
+      opacity: expression("App.tsx", "opacityAt"),
+      filter: expression("App.tsx", "applyCanvasFilter"),
+    },
+  );
+  await info.attach("empty-frame-pixels", {
+    body: JSON.stringify(pixels),
+    contentType: "application/json",
+  });
+  for (const segment of [pixels.first, pixels.second]) {
+    for (const pixel of [segment[0], segment[2]]) {
+      expect(Math.max(...pixel.slice(0, 3))).toBeLessThan(15);
+    }
+  }
+  expect(pixels.first[1][0]).toBeGreaterThan(230);
+  expect(pixels.first[1][2]).toBeLessThan(15);
+  expect(pixels.second[1][2]).toBeGreaterThan(230);
+  expect(pixels.second[1][0]).toBeLessThan(15);
+});
