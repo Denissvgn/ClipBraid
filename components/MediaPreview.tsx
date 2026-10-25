@@ -2,7 +2,11 @@ import React, { useMemo } from "react";
 import { MediaAsset } from "../types";
 import { MediaItemPreview } from "./MediaItemPreview";
 import { Icon } from "./Icon";
-import { createOpacitySampler } from "../services/timeline";
+import {
+  createOpacitySampler,
+  intervalsOverlap,
+  isIntervalActive,
+} from "../services/timeline";
 interface MediaPreviewProps {
   mediaAssets: MediaAsset[];
   /** Resolves a source ID to its live object URL (media source store). */
@@ -24,10 +28,8 @@ export const MediaPreview: React.FC<MediaPreviewProps> = ({
 }) => {
   const mountedAssets = useMemo(
     () =>
-      mediaAssets.filter(
-        (asset) =>
-          currentTime >= asset.startTime - 2 &&
-          currentTime <= asset.startTime + asset.duration + 2,
+      mediaAssets.filter((asset) =>
+        intervalsOverlap(asset, currentTime - 2, currentTime + 2),
       ),
     [mediaAssets, currentTime],
   );
@@ -73,12 +75,7 @@ export const MediaPreview: React.FC<MediaPreviewProps> = ({
               isPlaying={isPlaying}
               fitMode={fitMode}
               opacity={calculateOpacity(asset)}
-              zIndex={
-                currentTime >= asset.startTime &&
-                currentTime < asset.startTime + asset.duration
-                  ? 2
-                  : 1
-              }
+              zIndex={isIntervalActive(asset, currentTime) ? 2 : 1}
             />
           ))}
           {showSafeZones && (

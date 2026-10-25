@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, memo } from "react";
 import { AudioFragment, MediaAsset } from "../types";
+import { isIntervalActive, sourceTimeAt } from "../services/timeline";
 interface AudioEngineProps {
   audioTracks: AudioFragment[];
   mediaAssets: MediaAsset[];
@@ -79,9 +80,7 @@ export const AudioEngine = memo(
       audioTracks.forEach((track) => {
         const audio = audioRefs.current.get(track.id);
         if (!audio) return;
-        const trackEnd = track.startTime + track.duration;
-        const isWithinRange =
-          currentTime >= track.startTime && currentTime < trackEnd;
+        const isWithinRange = isIntervalActive(track, currentTime);
         if (isPlaying && isWithinRange) {
           const targetTime = currentTime - track.startTime;
           if (Math.abs(audio.currentTime - targetTime) > 0.35)
@@ -104,21 +103,19 @@ export const AudioEngine = memo(
         if (asset.type !== "video" || !asset.hasAudio || asset.muted) return;
         const audio = audioRefs.current.get(asset.id);
         if (!audio) return;
-        const assetEnd = asset.startTime + asset.duration;
-        const isWithinRange =
-          currentTime >= asset.startTime && currentTime < assetEnd;
+        const isWithinRange = isIntervalActive(asset, currentTime);
+        const targetTime = sourceTimeAt(asset, currentTime);
         if (isPlaying && isWithinRange) {
-          const targetTime = currentTime - asset.startTime + asset.trimStart;
           if (Math.abs(audio.currentTime - targetTime) > 0.35)
             audio.currentTime = targetTime;
           if (audio.paused) audio.play().catch(() => {});
         } else {
           if (!audio.paused) audio.pause();
-          if (isWithinRange) {
-            const targetTime = currentTime - asset.startTime + asset.trimStart;
-            if (Math.abs(audio.currentTime - targetTime) > 0.05) {
-              audio.currentTime = targetTime;
-            }
+          if (
+            isWithinRange &&
+            Math.abs(audio.currentTime - targetTime) > 0.05
+          ) {
+            audio.currentTime = targetTime;
           }
         }
       });

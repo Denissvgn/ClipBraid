@@ -13,10 +13,20 @@ import {
 } from "./services/project";
 import { MediaSourceStore, type SourceLease } from "./services/mediaSources";
 import {
-  projectDuration,
+  activeIntervals,
+  canvasFit,
+  clampPlayhead,
   createOpacitySampler,
-  exportFrameRate,
   estimateExport,
+  exportFrameRate,
+  frameCount,
+  frameTimestamp,
+  intervalsOverlap,
+  projectDuration,
+  recalculateMediaStartTimes as sequenceMediaStartTimes,
+  sourceTimeAt,
+  sourceWindow,
+  trimmedDuration,
   type ExportQuality,
 } from "./services/timeline";
 import { BrandMark } from "./components/BrandMark";
@@ -305,7 +315,7 @@ export default function App() {
   );
   const seekTo = useCallback(
     (t: number) => {
-      const clamped = Math.min(Math.max(0, t), totalDuration);
+      const clamped = clampPlayhead(t, totalDuration);
       setCurrentTime(clamped);
       if (isPlaying) {
         startTimeRef.current = clamped;
@@ -314,36 +324,20 @@ export default function App() {
     },
     [isPlaying, totalDuration],
   );
-  const clampTransition = useCallback(
-    (duration: number, prevDuration: number, currentDuration: number) => {
-      return Math.max(
-        0,
-        Math.min(duration, prevDuration - 0.1, currentDuration - 0.1),
-      );
-    },
-    [],
-  );
   const recalculateMediaStartTimes = useCallback(
-    (assets: MediaAsset[]): MediaAsset[] => {
-      let currentOffset = 0;
-      return assets.map((m, index) => {
-        const prev = assets[index - 1];
-        const trans =
-          index === 0
-            ? 0
-            : clampTransition(
-                m.transitionDuration ?? transitionDuration,
-                prev.duration,
-                m.duration,
-              );
-        const start = Math.max(0, currentOffset - trans);
-        const updated = { ...m, startTime: start, transitionDuration: trans };
-        currentOffset = start + m.duration;
-        return updated;
-      });
-    },
-    [transitionDuration, clampTransition],
+    (assets: MediaAsset[]): MediaAsset[] =>
+      sequenceMediaStartTimes(assets, transitionDuration),
+    [transitionDuration],
   );
+  // Duration-changing edits also clamp a paused playhead. Loading uses the
+  // same pure rule below, but against the restored project's own duration.
+  useEffect(() => {
+    const clamped = clampPlayhead(currentTime, totalDuration);
+    if (clamped === currentTime) return;
+    setCurrentTime(clamped);
+    startTimeRef.current = clamped;
+    playbackStartTimeRef.current = performance.now();
+  }, [currentTime, totalDuration]);
   const handleImportMedia = async () => {
     const tx = storeRef.current!.beginTransaction();
     try {
@@ -390,19 +384,9 @@ export default function App() {
           sourceHeight: sourceHeight || undefined,
         };
         tx.pin(asset.sourceId);
-        setMediaAssets((prev) => {
-          const last = prev[prev.length - 1];
-          const trans = last
-            ? clampTransition(transitionDuration, last.duration, dur)
-            : 0;
-          const start = last
-            ? Math.max(0, last.startTime + last.duration - trans)
-            : 0;
-          return [
-            ...prev,
-            { ...newAssetBase, startTime: start, transitionDuration: trans },
-          ];
-        });
+        setMediaAssets((prev) =>
+          recalculateMediaStartTimes([...prev, newAssetBase]),
+        );
         tx.commit();
         sysLog(
           "import",
@@ -759,12 +743,9 @@ export default function App() {
         ...track,
         sourceId: idMap.get(track.sourceId)!,
       }));
-      const restoredTime = Math.max(
-        0,
-        Math.min(
-          data.currentTime,
-          projectDuration(restoredMedia, restoredAudio),
-        ),
+      const restoredTime = clampPlayhead(
+        data.currentTime,
+        projectDuration(restoredMedia, restoredAudio),
       );
       // Commit: pre-pin so URLs exist at the first render, then publish one
       // batched state update. The pin-sync effect releases the replaced
@@ -846,10 +827,7 @@ export default function App() {
       const merged = { ...asset, ...updates };
 
       if (updates.trimStart !== undefined || updates.trimEnd !== undefined) {
-        merged.duration = Math.max(
-          0.1,
-          merged.originalDuration - (merged.trimStart + merged.trimEnd),
-        );
+        merged.duration = trimmedDuration(merged);
       }
 
       newAssets[index] = merged;
@@ -1012,22 +990,24 @@ export default function App() {
             if (!(await track.canDecode()))
               throw new Error("Unsupported audio codec");
             const sink = new AudioBufferSink(track);
+            const window = sourceWindow(asset);
+            const selectionEnd = window.start + asset.duration;
             for await (const wrapped of sink.buffers(
-              asset.trimStart,
-              asset.trimStart + asset.duration,
+              window.start,
+              selectionEnd,
             )) {
               signal?.throwIfAborted();
-              const from = Math.max(wrapped.timestamp, asset.trimStart);
+              const from = Math.max(wrapped.timestamp, window.start);
               const to = Math.min(
                 wrapped.timestamp + wrapped.buffer.duration,
-                asset.trimStart + asset.duration,
+                selectionEnd,
               );
               if (to <= from) continue;
               const source = offlineCtx.createBufferSource();
               source.buffer = wrapped.buffer;
               source.connect(offlineCtx.destination);
               source.start(
-                asset.startTime + from - asset.trimStart,
+                asset.startTime + from - window.start,
                 from - wrapped.timestamp,
                 to - from,
               );
@@ -1087,8 +1067,8 @@ export default function App() {
         const sinks = new Map<string, VideoSampleSink>();
         const images = new Map<string, ImageBitmap>();
         const inputs: Input[] = [];
-        const relevantAssets = mediaAssets.filter(
-          (a) => a.startTime < end && a.startTime + a.duration > start,
+        const relevantAssets = mediaAssets.filter((asset) =>
+          intervalsOverlap(asset, start, end),
         );
         let finalized = false;
         let passed = 0,
@@ -1117,25 +1097,20 @@ export default function App() {
             }
           }
           await output.start();
-          const totalFrames = Math.ceil(segmentDuration * fps);
+          const totalFrames = frameCount(segmentDuration, fps);
           const segmentStarted = performance.now();
           for (let i = 0; i < totalFrames; i++) {
             signal?.throwIfAborted();
-            const t = start + i * frameDuration;
-            const outTs = i * frameDuration;
-            const visible = relevantAssets.filter(
-              (a) => t >= a.startTime && t < a.startTime + a.duration,
-            );
+            const t = frameTimestamp(i, fps, start);
+            const outTs = frameTimestamp(i, fps);
+            const visible = activeIntervals(relevantAssets, t);
             const decoded = new Map<string, VideoSample>();
             const frameFor = async (asset: MediaAsset) => {
               if (decoded.has(asset.id)) return decoded.get(asset.id)!;
               const sink = sinks.get(asset.id);
               if (!sink) throw new Error(`Missing decoder for ${asset.name}`);
-              const local = t - asset.startTime + asset.trimStart;
-              const last = asset.originalDuration - asset.trimEnd - 1e-3;
-              const sample = await sink.getSample(
-                Math.max(0, Math.min(local, last)),
-              );
+              const local = sourceTimeAt(asset, t);
+              const sample = await sink.getSample(local);
               if (!sample)
                 throw new Error(
                   `No decoded frame for ${asset.name} at ${local.toFixed(3)}s`,
@@ -1186,42 +1161,30 @@ export default function App() {
                     const image = images.get(asset.id);
                     if (!image)
                       throw new Error(`Missing image for ${asset.name}`);
-                    const scale =
-                      fitMode === "cover"
-                        ? Math.max(
-                            targetWidth / image.width,
-                            targetHeight / image.height,
-                          )
-                        : Math.min(
-                            targetWidth / image.width,
-                            targetHeight / image.height,
-                          );
+                    const fit = canvasFit(
+                      image.width,
+                      image.height,
+                      targetWidth,
+                      targetHeight,
+                      fitMode,
+                    );
                     ctx.drawImage(
                       image,
-                      (targetWidth - image.width * scale) / 2,
-                      (targetHeight - image.height * scale) / 2,
-                      image.width * scale,
-                      image.height * scale,
+                      fit.x,
+                      fit.y,
+                      fit.width,
+                      fit.height,
                     );
                   } else {
                     const sample = await frameFor(asset);
-                    const scale =
-                      fitMode === "cover"
-                        ? Math.max(
-                            targetWidth / sample.displayWidth,
-                            targetHeight / sample.displayHeight,
-                          )
-                        : Math.min(
-                            targetWidth / sample.displayWidth,
-                            targetHeight / sample.displayHeight,
-                          );
-                    sample.draw(
-                      ctx,
-                      (targetWidth - sample.displayWidth * scale) / 2,
-                      (targetHeight - sample.displayHeight * scale) / 2,
-                      sample.displayWidth * scale,
-                      sample.displayHeight * scale,
+                    const fit = canvasFit(
+                      sample.displayWidth,
+                      sample.displayHeight,
+                      targetWidth,
+                      targetHeight,
+                      fitMode,
                     );
+                    sample.draw(ctx, fit.x, fit.y, fit.width, fit.height);
                   }
                 }
                 ctx.globalAlpha = 1;
@@ -1410,11 +1373,9 @@ export default function App() {
   const videos = mediaAssets.filter((asset) => asset.type === "video");
   const allVideoMuted =
     videos.length > 0 && videos.every((asset) => asset.muted);
-  const activeClip = mediaAssets.find(
-    (asset) =>
-      currentTime >= asset.startTime &&
-      currentTime < asset.startTime + asset.duration,
-  );
+  const activeClip = activeIntervals(mediaAssets, currentTime).at(-1);
+  const audioOnly =
+    !activeClip && activeIntervals(audioTracks, currentTime).length > 0;
   const displayTime = (time: number) =>
     `${Math.floor(time / 60)
       .toString()
@@ -1529,7 +1490,8 @@ export default function App() {
           <div className="preview-heading">
             <h1>Preview</h1>
             <span className="preview-caption">
-              {activeClip?.name || "Your video starts here"}
+              {activeClip?.name ||
+                (audioOnly ? "Audio only" : "Your video starts here")}
             </span>
             <div
               className="segmented ratio-controls"

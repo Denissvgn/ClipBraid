@@ -82,6 +82,49 @@ test("restored playhead uses the new project duration and long-project size is h
   await expect(page.getByText(/MB target/)).toHaveCount(0);
 });
 
+test("deleting a clip clamps a paused playhead to the shortened project", async ({
+  page,
+}) => {
+  await openEditor(page);
+  const first = await asset("landscape-red.png", { duration: 2 });
+  const second = await asset("portrait-blue.png", {
+    id: "visual-2",
+    name: "second.png",
+    startTime: 2,
+    duration: 2,
+  });
+  await loadDraft(page, { ...draft([first, second]), currentTime: 3.5 });
+  await page
+    .getByRole("button", { name: "Edit landscape-red.png", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Remove clip", exact: true }).click();
+  expect((await saveDraft(page)).currentTime).toBe(2);
+});
+
+test("an audio tail has an explicit preview state and determines duration", async ({
+  page,
+}) => {
+  await openEditor(page);
+  const visual = await asset("landscape-red.png", { duration: 1 });
+  const audio = {
+    id: "audio-tail",
+    mediaId: "audio-tail",
+    name: "Tone",
+    mimeType: "audio/wav",
+    base64: (await readFile("tests/fixtures/tone-impulses.wav")).toString(
+      "base64",
+    ),
+    startTime: 0,
+    duration: 3,
+  };
+  await loadDraft(page, {
+    ...draft([visual], [audio]),
+    currentTime: 2,
+  });
+  await expect(page.locator(".preview-caption")).toHaveText("Audio only");
+  expect((await saveDraft(page)).currentTime).toBe(2);
+});
+
 test("replacing a project with the same clip ID replaces its audio source and pauses playback", async ({
   page,
 }) => {
@@ -314,6 +357,7 @@ test("preview and encoded crossfades preserve brightness throughout the overlap"
         segmentProgress: { current: [0, 0] },
         setExportProgress: () => {},
       };
+      Object.assign(scope, timeline);
       const fn = new Function(...Object.keys(scope), render)(
         ...Object.values(scope),
       );
@@ -403,6 +447,7 @@ test("trimmed buffers exclude both boundaries and standalone tracks end at their
         getBlob: async () => new Blob(["fixture"]),
         audioBufferToWav: new Function(wav)(),
       };
+      Object.assign(scope, window.testRuntime.timeline);
       const invoke = () =>
         new Function(...Object.keys(scope), mix)(...Object.values(scope))();
       const decode = async (bytes) =>

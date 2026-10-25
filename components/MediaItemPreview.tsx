@@ -1,5 +1,10 @@
 import React, { useEffect, useRef, memo } from "react";
 import { MediaAsset, VisualFilter } from "../types";
+import {
+  intervalsOverlap,
+  isIntervalActive,
+  sourceTimeAt,
+} from "../services/timeline";
 interface MediaItemPreviewProps {
   asset: MediaAsset;
   /** Resolved object URL for the immutable source; hidden while undefined. */
@@ -22,17 +27,16 @@ export const MediaItemPreview = memo(
   }: MediaItemPreviewProps) => {
     const videoRef = useRef<HTMLVideoElement>(null);
 
-    // Calculate local time adjusted by trim offset
-    const localTime = currentTime - asset.startTime + asset.trimStart;
-    const isVisible =
-      currentTime >= asset.startTime - 0.5 &&
-      currentTime <= asset.startTime + asset.duration + 0.5;
+    const localTime = sourceTimeAt(asset, currentTime);
+    const isVisible = intervalsOverlap(
+      asset,
+      currentTime - 0.5,
+      currentTime + 0.5,
+    );
     useEffect(() => {
       if (asset.type !== "video" || !videoRef.current) return;
       const video = videoRef.current;
-      const isActive =
-        currentTime >= asset.startTime &&
-        currentTime < asset.startTime + asset.duration;
+      const isActive = isIntervalActive(asset, currentTime);
       if (isActive) {
         if (isPlaying) {
           if (Math.abs(video.currentTime - localTime) > 0.3) {

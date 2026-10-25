@@ -120,6 +120,7 @@ test("mixed PCM ends at clip trim", async ({ context }, info) => {
         getBlob: async () => clipBlob,
         audioBufferToWav: new Function(wav)(),
       };
+      Object.assign(scope, window.testRuntime.timeline);
       const fn = new Function(...Object.keys(scope), mix)(
         ...Object.values(scope),
       );
@@ -265,6 +266,7 @@ test("contain margins clear after a landscape-to-portrait cut", async ({
         segmentProgress: { current: [0, 0] },
         setExportProgress: () => {},
       };
+      Object.assign(scope, window.testRuntime.timeline);
       const fn = new Function(...Object.keys(scope), render)(
         ...Object.values(scope),
       );
@@ -347,6 +349,7 @@ test("parallel segment canvases render black before, between and after clips", a
         segmentProgress: { current: [0, 0] },
         setExportProgress: () => {},
       };
+      Object.assign(scope, window.testRuntime.timeline);
       const renderSegment = new Function(...Object.keys(scope), render)(
         ...Object.values(scope),
       );

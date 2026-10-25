@@ -1,12 +1,177 @@
 import type { MediaAsset, AudioFragment } from "../types";
 
+export interface TimelineInterval {
+  startTime: number;
+  duration: number;
+}
+
+// Timeline intervals are half-open: a clip is active at its start and inactive
+// at its exact end. Adjacent clips therefore never both own the cut timestamp.
+export function intervalEnd(interval: TimelineInterval): number {
+  return interval.startTime + interval.duration;
+}
+
+export function isIntervalActive(
+  interval: TimelineInterval,
+  time: number,
+): boolean {
+  return (
+    interval.duration > 0 &&
+    time >= interval.startTime &&
+    time < intervalEnd(interval)
+  );
+}
+
+export function activeIntervals<T extends TimelineInterval>(
+  intervals: T[],
+  time: number,
+): T[] {
+  return intervals.filter((interval) => isIntervalActive(interval, time));
+}
+
+export function intervalsOverlap(
+  interval: TimelineInterval,
+  start: number,
+  end: number,
+): boolean {
+  return (
+    end > start && interval.startTime < end && intervalEnd(interval) > start
+  );
+}
+
+export function clampPlayhead(time: number, duration: number): number {
+  if (!Number.isFinite(duration) || duration <= 0 || Number.isNaN(time))
+    return 0;
+  return Math.min(Math.max(0, time), duration);
+}
+
+// Standalone audio deliberately extends the project beyond the last visual.
+// Export supplies black frames for that tail; the editor labels it Audio only.
 export function projectDuration(
   media: MediaAsset[],
   audio: AudioFragment[],
 ): number {
-  const end = (max: number, asset: { startTime: number; duration: number }) =>
-    Math.max(max, asset.startTime + asset.duration);
+  const end = (max: number, interval: TimelineInterval) =>
+    Math.max(max, intervalEnd(interval));
   return Math.max(media.reduce(end, 1), audio.reduce(end, 1));
+}
+
+export function timelineViewportDuration(
+  media: MediaAsset[],
+  audio: AudioFragment[],
+): number {
+  return Math.max(10, projectDuration(media, audio));
+}
+
+export function clampTransition(
+  duration: number,
+  previousDuration: number,
+  currentDuration: number,
+): number {
+  return Math.max(
+    0,
+    Math.min(duration, previousDuration - 0.1, currentDuration - 0.1),
+  );
+}
+
+// Array order is timeline/stacking order. Each clip keeps its own edit state,
+// including when several instances reference the same immutable source.
+export function recalculateMediaStartTimes(
+  media: MediaAsset[],
+  defaultTransition = 0,
+): MediaAsset[] {
+  let currentOffset = 0;
+  return media.map((asset, index) => {
+    const previous = media[index - 1];
+    const transition =
+      index === 0
+        ? 0
+        : clampTransition(
+            asset.transitionDuration ?? defaultTransition,
+            previous.duration,
+            asset.duration,
+          );
+    const startTime = Math.max(0, currentOffset - transition);
+    const updated = { ...asset, startTime, transitionDuration: transition };
+    currentOffset = intervalEnd(updated);
+    return updated;
+  });
+}
+
+export function sourceWindow(
+  asset: Pick<MediaAsset, "trimStart" | "trimEnd" | "originalDuration">,
+): { start: number; end: number } {
+  const start = Math.max(0, asset.trimStart);
+  return {
+    start,
+    end: Math.max(start, asset.originalDuration - asset.trimEnd),
+  };
+}
+
+export function trimmedDuration(
+  asset: Pick<MediaAsset, "trimStart" | "trimEnd" | "originalDuration">,
+): number {
+  const window = sourceWindow(asset);
+  return Math.max(0.1, window.end - window.start);
+}
+
+export function sourceTimeAt(
+  asset: Pick<
+    MediaAsset,
+    "startTime" | "trimStart" | "trimEnd" | "originalDuration"
+  >,
+  time: number,
+): number {
+  const window = sourceWindow(asset);
+  const last = Math.max(window.start, window.end - 1e-3);
+  return Math.max(
+    window.start,
+    Math.min(time - asset.startTime + window.start, last),
+  );
+}
+
+export function canvasFit(
+  sourceWidth: number,
+  sourceHeight: number,
+  targetWidth: number,
+  targetHeight: number,
+  fitMode: "contain" | "cover",
+): { x: number; y: number; width: number; height: number } {
+  if (
+    ![sourceWidth, sourceHeight, targetWidth, targetHeight].every(
+      (value) => Number.isFinite(value) && value > 0,
+    )
+  )
+    return { x: 0, y: 0, width: 0, height: 0 };
+  const scale =
+    fitMode === "cover"
+      ? Math.max(targetWidth / sourceWidth, targetHeight / sourceHeight)
+      : Math.min(targetWidth / sourceWidth, targetHeight / sourceHeight);
+  const width = sourceWidth * scale;
+  const height = sourceHeight * scale;
+  return {
+    x: (targetWidth - width) / 2,
+    y: (targetHeight - height) / 2,
+    width,
+    height,
+  };
+}
+
+export function frameCount(duration: number, fps: number): number {
+  return Number.isFinite(duration) &&
+    Number.isFinite(fps) &&
+    duration > 0 &&
+    fps > 0
+    ? Math.ceil(duration * fps)
+    : 0;
+}
+
+export function frameTimestamp(
+  index: number,
+  fps: number,
+  start = 0,
+): number {
+  return start + index / fps;
 }
 
 export function nextAssets(

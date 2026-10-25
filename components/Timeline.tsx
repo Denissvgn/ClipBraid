@@ -1,5 +1,9 @@
 import React, { useRef, useMemo } from "react";
 import { MediaAsset, AudioFragment } from "../types";
+import {
+  clampPlayhead,
+  timelineViewportDuration,
+} from "../services/timeline";
 import { Icon } from "./Icon";
 interface TimelineProps {
   mediaAssets: MediaAsset[];
@@ -33,12 +37,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const labelWidth = 144;
   const totalDuration = useMemo(
-    () =>
-      Math.max(
-        10,
-        ...mediaAssets.map((a) => a.startTime + a.duration),
-        ...audioTracks.map((a) => a.startTime + a.duration),
-      ),
+    () => timelineViewportDuration(mediaAssets, audioTracks),
     [mediaAssets, audioTracks],
   );
   const step = zoom < 20 ? 10 : zoom < 50 ? 5 : 2;
@@ -54,7 +53,7 @@ export const Timeline: React.FC<TimelineProps> = ({
       event.clientX -
       container.getBoundingClientRect().left +
       container.scrollLeft;
-    onSeek(Math.min(Math.max(0, (x - labelWidth) / zoom), totalDuration));
+    onSeek(clampPlayhead((x - labelWidth) / zoom, totalDuration));
   };
   return (
     <section className="timeline" aria-label="Timeline tracks">
