@@ -35,7 +35,7 @@ test("real decoded PCM excludes impulses on both resampled trim edges", async ({
     }
     return results;
   }, { tone: (await readFile("tests/fixtures/tone-impulses.wav")).toString("base64"),
-    mix: expression("App.tsx", "mixAudio"), wav: expression("App.tsx", "audioBufferToWav") });
+    mix: expression("services/exportPipeline.ts", "mixAudio"), wav: expression("services/exportPipeline.ts", "audioBufferToWav") });
   await info.attach("resampled-trim-edges", { body: JSON.stringify(results), contentType: "application/json" });
   for (const result of results) expect(result.max).toBe(0);
 });
@@ -82,7 +82,7 @@ test("real decoded sample windows preserve stereo, timestamp gaps and exact time
       }
     }
     return results;
-  }, { mix: expression("App.tsx", "mixAudio"), wav: expression("App.tsx", "audioBufferToWav") });
+  }, { mix: expression("services/exportPipeline.ts", "mixAudio"), wav: expression("services/exportPipeline.ts", "audioBufferToWav") });
   await info.attach("decoded-sample-windows", { body: JSON.stringify(results), contentType: "application/json" });
   for (const result of results) {
     for (const [channel, values] of result.channels.entries()) {

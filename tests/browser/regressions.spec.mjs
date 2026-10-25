@@ -141,8 +141,8 @@ test("mixed PCM ends at clip trim", async ({ context }, info) => {
     },
     {
       clip,
-      mix: expression("App.tsx", "mixAudio"),
-      wav: expression("App.tsx", "audioBufferToWav"),
+      mix: expression("services/exportPipeline.ts", "mixAudio"),
+      wav: expression("services/exportPipeline.ts", "audioBufferToWav"),
     },
   );
   expect(result.inside).toBeGreaterThan(0.03);
@@ -294,9 +294,9 @@ test("contain margins clear after a landscape-to-portrait cut", async ({
     },
     {
       clips,
-      render: expression("App.tsx", "renderSegment"),
-      opacity: expression("App.tsx", "opacityAt"),
-      filter: expression("App.tsx", "applyCanvasFilter"),
+      render: expression("services/exportPipeline.ts", "renderSegment"),
+      opacity: expression("services/exportPipeline.ts", "opacityAt"),
+      filter: expression("services/exportPipeline.ts", "applyCanvasFilter"),
     },
   );
   expect(result.center[2]).toBeGreaterThan(230);
@@ -386,9 +386,9 @@ test("parallel segment canvases render black before, between and after clips", a
     },
     {
       clips,
-      render: expression("App.tsx", "renderSegment"),
-      opacity: expression("App.tsx", "opacityAt"),
-      filter: expression("App.tsx", "applyCanvasFilter"),
+      render: expression("services/exportPipeline.ts", "renderSegment"),
+      opacity: expression("services/exportPipeline.ts", "opacityAt"),
+      filter: expression("services/exportPipeline.ts", "applyCanvasFilter"),
     },
   );
   await info.attach("empty-frame-pixels", {

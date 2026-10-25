@@ -255,6 +255,8 @@ test("rejected and false save acknowledgements stay failed and permit a clean re
         window.saveCalls++;
         if (window.saveMode === "reject")
           throw new Error("injected save rejection");
+        if (window.saveMode === "null") return null;
+        if (window.saveMode === "undefined") return undefined;
         return false;
       },
     };
@@ -264,7 +266,7 @@ test("rejected and false save acknowledgements stay failed and permit a clean re
   await page.getByRole("button", { name: "draft", exact: true }).click();
   let downloads = 0;
   page.on("download", () => downloads++);
-  for (const mode of ["reject", "false"]) {
+  for (const mode of ["reject", "false", "null", "undefined"]) {
     await page.evaluate((mode) => {
       window.saveMode = mode;
     }, mode);
@@ -278,7 +280,7 @@ test("rejected and false save acknowledgements stay failed and permit a clean re
       page.getByRole("button", { name: "Export video", exact: true }),
     ).toBeEnabled();
   }
-  expect(await page.evaluate(() => window.saveCalls)).toBe(2);
+  expect(await page.evaluate(() => window.saveCalls)).toBe(4);
   expect(downloads).toBe(0);
 });
 
@@ -384,8 +386,8 @@ test("preview and encoded crossfades preserve brightness throughout the overlap"
     },
     {
       clips,
-      render: expression("App.tsx", "renderSegment"),
-      filter: expression("App.tsx", "applyCanvasFilter"),
+      render: expression("services/exportPipeline.ts", "renderSegment"),
+      filter: expression("services/exportPipeline.ts", "applyCanvasFilter"),
     },
   );
   for (const pixel of [pixels[0], pixels[1]]) {
@@ -483,8 +485,8 @@ test("trimmed buffers exclude both boundaries and standalone tracks end at their
       };
     },
     {
-      mix: expression("App.tsx", "mixAudio"),
-      wav: expression("App.tsx", "audioBufferToWav"),
+      mix: expression("services/exportPipeline.ts", "mixAudio"),
+      wav: expression("services/exportPipeline.ts", "audioBufferToWav"),
       tone,
     },
   );
