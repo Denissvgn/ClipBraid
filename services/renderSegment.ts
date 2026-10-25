@@ -1,7 +1,7 @@
 import type { MediaAsset, VisualFilter } from "../types";
 import { activeIntervals, canvasFit, createOpacitySampler, frameCount, frameTimestamp, intervalsOverlap, sourceTimeAt } from "./timeline";
 import { Input, Output, Mp4OutputFormat, BufferTarget, BlobSource, ALL_FORMATS, VideoSampleSource, VideoSample, VideoSampleSink } from "mediabunny";
-export interface RenderSettings { targetWidth: number; targetHeight: number; videoBitrate: number; fps: number; frameDuration: number; fitMode: "contain" | "cover"; frameStart?: number; frameEnd?: number }
+export interface RenderSettings { targetWidth: number; targetHeight: number; videoBitrate: number; fps: number; frameDuration: number; fitMode: "contain" | "cover"; frameStart?: number; frameEnd?: number; hardwareAcceleration?: "no-preference" | "prefer-software" }
 const applyCanvasFilter = (
   ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D,
   filter: VisualFilter,
@@ -54,6 +54,7 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
     codec: "avc",
     bitrate: videoBitrate,
     keyFrameInterval: 4,
+    hardwareAcceleration: settings.hardwareAcceleration ?? "no-preference",
   });
   output.addVideoTrack(videoSource, { frameRate: fps });
   const canvas = new OffscreenCanvas(targetWidth, targetHeight);

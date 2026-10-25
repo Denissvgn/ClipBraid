@@ -153,6 +153,7 @@ export default function App() {
 
   // Export states
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
+  const [singleEncoder, setSingleEncoder] = useState(false);
   const [exportQuality, setExportQuality] = useState<ExportQuality>("standard");
 
   const [isRecording, setIsRecording] = useState(false);
@@ -878,7 +879,7 @@ export default function App() {
     setIsPlaying(false);
     setStatus("EXPORTING...");
     void exportJobs.start({ mediaAssets, audioTracks, aspectRatio, fitMode,
-      exportQuality, totalDuration });
+      exportQuality, totalDuration, segmentPreference: singleEncoder ? 1 : 2 });
   };
   const videos = mediaAssets.filter((asset) => asset.type === "video");
   const allVideoMuted =
@@ -1466,6 +1467,7 @@ export default function App() {
                 </section>
                 <section className="inspector-section">
                   <h3>Export quality</h3>
+                  <label><input type="checkbox" checked={singleEncoder} onChange={event => setSingleEncoder(event.target.checked)} />Compatibility render (one encoder)</label>
                   <p className="helper-text">Draft: 480p. Standard/High: 720p. Export uses up to 30 fps, square pixels and SDR color; framing and frame-rate conversion may change the source appearance.</p>
                   <div className="segmented">
                     {(["draft", "standard", "high"] as ExportQuality[]).map(

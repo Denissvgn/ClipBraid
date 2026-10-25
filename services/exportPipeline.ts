@@ -1,3 +1,4 @@
+import { renderVisualPlan } from "./encoderPlan";
 import { outputProfile, frameSegments } from "./outputProfile";
 import { renderInWorker } from "./renderWorker";
 import { preflightAssets } from "./preflight";
@@ -91,18 +92,6 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
     const { width: targetWidth, height: targetHeight, fps, videoBitrate, audioBitrate } = profile;
     const frameDuration = 1 / fps;
     profile.conversions.forEach(addLog);
-    // Pre-flight: fail fast with a clear message if this device has no AVC encoder
-    // (same capability-gap class as the AAC encoder — verify codec availability before export).
-    if (
-      !(await resources.wait(canEncodeVideo("avc", {
-        width: targetWidth,
-        height: targetHeight,
-      })))
-    ) {
-      throw new Error(
-        "This device cannot encode AVC video — export is not supported in this environment.",
-      );
-    }
     addLog(
       `Target: ${targetWidth}x${targetHeight} @ ${fps}fps, ${Math.round(videoBitrate / 1000)} kbps (${exportQuality.toUpperCase()})`,
     );
@@ -174,16 +163,8 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
       header.setUint32(40, frames * 4, true);
       return mixed;
     };
-    const segments = frameSegments(profile);
-    const renderSegment = (segment: typeof segments[number]) =>
-      renderInWorker(snapshot, { targetWidth, targetHeight, videoBitrate, fps, frameDuration, fitMode,
-        frameStart: segment.frameStart, frameEnd: segment.frameEnd }, segment.start, segment.end, segment.index,
-        { ...context, setExportProgress: progress => {
-          segmentProgress.current[segment.index] = progress;
-          setExportProgress(segmentProgress.current[0] + segmentProgress.current[1]);
-        } });
     const cancellation = resources;
-    const run = async (work: () => Promise<Uint8Array>) => {
+    const run = async <T,>(work: () => Promise<T>) => {
       try {
         return await work();
       } catch (error) {
@@ -193,43 +174,23 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
     };
     // A failed branch cancels its siblings; settle their cleanup before a retry.
     const results = await Promise.allSettled([
-      run(() => renderSegment(segments[0])),
-      run(() => renderSegment(segments[1])),
+      run(() => renderVisualPlan(snapshot, profile, context)),
       run(() => mixAudio(cancellation.signal, resources, addLog)),
     ]);
-    const [chunk1, chunk2, audioData] = results.map((result) => {
-      if (result.status === "rejected") throw result.reason;
-      return result.value;
-    });
-    report({ phase: "rendering", segments: [chunk1.byteLength, chunk2.byteLength], audioBytes: audioData.byteLength });
-    phase("muxing");
-    setExportProgress(70);
-    addLog("PASS 2/4: Concatenating Visual Stream...");
-
-    await ffmpegService.writeFile("seg1.mp4", chunk1);
-    await ffmpegService.writeFile("seg2.mp4", chunk2);
+    const visual = results[0]; if (visual.status === "rejected") throw visual.reason;
+    const audio = results[1]; if (audio.status === "rejected") throw audio.reason;
+    const { chunks, plan, attempts, preference } = visual.value, audioData = audio.value;
+    report({ phase: "rendering", segments: chunks.map(chunk => chunk.byteLength), audioBytes: audioData.byteLength, plan, attempts, preference });
+    phase("muxing"); setExportProgress(70);
     await ffmpegService.writeFile("mix.wav", audioData);
-
-    const concatList = "file 'seg1.mp4'\nfile 'seg2.mp4'";
-    await ffmpegService.writeFile(
-      "list.txt",
-      new TextEncoder().encode(concatList),
-    );
-
-    addLog("Merging video segments...");
-    await ffmpegService.exec([
-      "-f",
-      "concat",
-      "-safe",
-      "0",
-      "-i",
-      "list.txt",
-      "-c",
-      "copy",
-      "-y",
-      "joined.mp4",
-    ]);
-
+    if (chunks.length === 1) await ffmpegService.writeFile("joined.mp4", chunks[0]);
+    else {
+      await ffmpegService.writeFile("seg1.mp4", chunks[0]);
+      await ffmpegService.writeFile("seg2.mp4", chunks[1]);
+      await ffmpegService.writeFile("list.txt", new TextEncoder().encode("file 'seg1.mp4'\nfile 'seg2.mp4'"));
+      addLog("Merging video segments...");
+      await ffmpegService.exec(["-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy", "-y", "joined.mp4"]);
+    }
     setExportProgress(80);
     addLog("PASS 3/4: Encoding Master Audio (AAC)...");
     // AAC encoded here by ffmpeg's software encoder — WebCodecs has none on Android WebView.

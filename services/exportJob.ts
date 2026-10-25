@@ -11,12 +11,13 @@ export interface ExportSnapshot {
   fitMode: "contain" | "cover";
   exportQuality: ExportQuality;
   totalDuration: number;
+  segmentPreference?: 1 | 2;
 }
 export type ExportPhase = "idle" | "preparing" | "rendering" | "muxing" | "saving" | "cancelling" | "cleaning" | "cancelled" | "complete" | "failed";
 export type ExportPhaseResult =
   | { phase: "preparing"; assets: AssetInventory[] }
   | { phase: "preparing"; profile: OutputProfile }
-  | { phase: "rendering"; segments: number[]; audioBytes: number }
+  | { phase: "rendering"; segments: number[]; audioBytes: number; plan?: "single" | "parallel"; attempts?: number; preference?: string }
   | { phase: "muxing"; videoBytes: number }
   | { phase: "saving"; accepted: true };
 export interface ExportResult { videoBytes: number; delivery: "adapter-accepted" }
