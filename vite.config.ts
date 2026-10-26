@@ -5,9 +5,8 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-import { inspectArtifacts, assertProductModules } from './scripts/artifact-policy.mjs';
-import { sourceIdentity } from './scripts/source-identity.mjs';
+import { inspectArtifacts, assertProductModules, assertSafeOutputDirectory, assertProductArtifact } from './scripts/artifact-policy.mjs';
+import { sourceIdentity, repositoryState } from './scripts/source-identity.mjs';
 import brandIdentity from './brand.json';
 import packageMetadata from './package.json';
 
@@ -18,10 +17,16 @@ export default defineConfig(({ command, mode }) => {
   const automation = command === 'serve' && mode === 'test';
   let outputDir = '';
   let projectRoot = '';
+  let buildConfiguration: Record<string, unknown> = {};
   const isolation: Plugin = {
     name: 'product-artifact-isolation',
     enforce: 'post',
-    configResolved(config) { outputDir = resolve(config.root, config.build.outDir); projectRoot = config.root; },
+    configResolved(config) {
+      outputDir = resolve(config.root, config.build.outDir); projectRoot = config.root;
+      if(command === 'build')assertSafeOutputDirectory(outputDir);
+      buildConfiguration={command,mode,base:config.base,target:config.build.target,sourcemap:config.build.sourcemap,
+        nodeEnv:process.env.NODE_ENV ?? null,automation,publicDir:false};
+    },
     transformIndexHtml: {
       order: 'pre',
       handler(html) {
@@ -42,6 +47,11 @@ export default defineConfig(({ command, mode }) => {
         stream.pipe(res);
       });
     },
+    generateBundle(_options,bundle) {
+      if(command!=='build')return;
+      assertProductModules(Object.values(bundle).flatMap(item=>item.type==='chunk'?Object.keys(item.modules):[]),projectRoot);
+      for(const [name,item] of Object.entries(bundle))assertProductArtifact(name,item.type==='chunk'?item.code:item.source);
+    },
     async writeBundle(_options, bundle) {
       if (command !== 'build') return;
       assertProductModules(Object.values(bundle).flatMap(item => item.type === 'chunk' ? Object.keys(item.modules) : []), projectRoot);
@@ -51,13 +61,9 @@ export default defineConfig(({ command, mode }) => {
       });
       const files = await inspectArtifacts(outputDir, expected);
       await mkdir('reports', { recursive: true });
-      let commit: string | null = null, dirty: boolean | null = null;
-      try {
-        commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-        dirty = !!execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-      } catch { /* Source archives have no Git metadata; the source hash remains authoritative. */ }
       await writeFile('reports/build-artifacts.json', JSON.stringify({ schemaVersion: 1, buildId,
-        source: { commit, dirty, inputsSha256: identity.sha256 }, outputDir, files }, null, 2) + '\n');
+        source: { ...repositoryState(), inputsSha256: identity.sha256 }, configuration:buildConfiguration,
+        toolchain:{node:process.version,vite:packageMetadata.devDependencies.vite},outputDir, files }, null, 2) + '\n');
     },
   };
   return {

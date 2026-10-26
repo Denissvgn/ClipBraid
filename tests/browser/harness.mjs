@@ -1,10 +1,13 @@
 import { test as base, expect } from '@playwright/test';
 import { createHash } from 'node:crypto';
 import { sourceIdentity } from '../../scripts/source-identity.mjs';
+import { readFileSync } from 'node:fs';
 const expectedSource = sourceIdentity().sha256;
+const expectedBrowser=JSON.parse(readFileSync('node_modules/playwright-core/browsers.json')).browsers.find(browser=>browser.name==='chromium').browserVersion;
 export { expect };
 export const test=base.extend({
   context:async({context},use,info)=>{
+    expect(context.browser()?.version()).toBe(expectedBrowser);
     const resources=[];const pending=[];
     context.on('response',response=>{
       const request=response.request();

@@ -2,12 +2,11 @@ import { test, expect } from "../browser/harness.mjs";
 import { openEditor } from "../browser/helpers.mjs";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
-import { sourceIdentity } from "../../scripts/source-identity.mjs";
+import { sourceIdentity, repositoryState } from "../../scripts/source-identity.mjs";
 
 test("the served production candidate matches the source identity and every emitted asset hash", async ({page},info) => {
   const manifest = JSON.parse(await readFile("reports/build-artifacts.json", "utf8"));
-  expect(manifest.source.commit).toBe(execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim());
+  expect(manifest.source.commit).toBe(repositoryState().commit);
   expect(manifest.source.inputsSha256).toBe(sourceIdentity().sha256);
   await openEditor(page);
   expect(await page.locator(".editor-app").getAttribute("data-build-id")).toBe(manifest.buildId);
@@ -42,10 +41,9 @@ test("production query parameters cannot expose automation or development journa
   ]) {
     const response = await page.request.get(path);
     // Static SPA servers may fall back to index.html; neither result is fixture data.
-    expect(
-      (await response.text()).startsWith("<!doctype html>") ||
-        response.status() === 404,
-    ).toBe(true);
+    const content=await response.body();
+    if(response.status()===404)expect(content.length).toBeLessThan(4096);
+    else expect(content).toEqual(await(await page.request.get('/')).body());
   }
 });
 

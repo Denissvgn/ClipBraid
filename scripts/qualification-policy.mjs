@@ -22,3 +22,10 @@ export function assessPlaywright(report, fullSuite = false) {
     expectedFailures: tests.filter(test => test.expectedStatus === 'failed').map(test => test.title),
     missingSpecs, valid: tests.length > 0 && passed.length === tests.length && missingSpecs.length === 0 };
 }
+export function assessSmokeEvidence(value) {
+  return !!value && /^[a-f0-9-]{36}$/.test(value.jobId??'') && /^[a-f0-9]{64}:(test|production)$/.test(value.buildId??'')
+    && /^[a-f0-9]{64}$/.test(value.sha256??'') && Number.isSafeInteger(value.bytes) && value.bytes>0
+    && value.job?.jobId===value.jobId && value.job?.buildId===value.buildId && value.job?.outcome==='download-started'
+    && value.job?.cleanupComplete===true && /^[a-f0-9]{64}$/.test(value.job?.input?.fingerprint??'')
+    && value.videoCodec==='avc' && value.audioCodec==='aac' && value.tone>.08 && value.silence<.005;
+}

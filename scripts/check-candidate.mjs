@@ -2,19 +2,18 @@ import { spawn, execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, renameSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
-import { sourceIdentity } from './source-identity.mjs';
+import { sourceIdentity, repositoryState } from './source-identity.mjs';
 import { assessPlaywright } from './qualification-policy.mjs';
 
 // One gate at a time, with private evidence even when a child fails or times out.
 const gates = [['check:toolchain',30000], ['typecheck',60000], ['check:mcp',60000], ['test:unit',120000],
-  ['build',120000], ['check:style-isolation',120000], ['check:artifacts',30000], ['test:browser',970000], ['test:production',120000]];
+  ['build',120000], ['check:build-isolation',120000], ['check:style-isolation',120000], ['check:artifacts',30000], ['test:browser',970000], ['test:production',120000]];
 const directory = 'reports/qualification'; mkdirSync(directory,{recursive:true});
-const reportFiles=['reports/build-artifacts.json','reports/browser-manifest.json','reports/browser-results.json','reports/production-results.json'];
+const reportFiles=['reports/toolchain.json','reports/build-artifacts.json','reports/build-isolation.json','reports/style-isolation.json','reports/browser-manifest.json','reports/browser-results.json','reports/production-results.json'];
 for(const file of reportFiles)rmSync(file,{force:true}); // A stopped gate must not inherit a previous run's evidence.
 const initial = sourceIdentity(), sha = value => createHash('sha256').update(value).digest('hex');
 const manifest = {schemaVersion:1,status:'running',startedAt:new Date().toISOString(),
-  source:{commit:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),
-    dirty:!!execFileSync('git',['status','--porcelain'],{encoding:'utf8'}).trim(),inputsSha256:initial.sha256},
+  source:{...repositoryState(),inputsSha256:initial.sha256},
   sourceInputs:initial.inputs,lockfileSha256:sha(readFileSync('package-lock.json')),
   environment:{node:process.version,npm:execFileSync('npm',['--version'],{encoding:'utf8'}).trim(),os:`${os.platform()} ${os.release()} ${os.arch()}`},
   scope:'Automated bounded synthetic media and recovery on standalone pinned Chromium. Full-reference visual/listening, physical device/Flow, user validation and release rollout remain separate.',

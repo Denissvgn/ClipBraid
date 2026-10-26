@@ -72,6 +72,11 @@ npm run audit:dependencies
 
 The bounded suite checks media regressions, worker failures and production isolation.
 A green result does not establish complete media, device or delivery qualification.
+Required checks use the pinned npm packages and Chromium; native `ffmpeg` and
+`ffprobe` commands are optional independent inspection tools. Regenerating the
+[synthetic fixtures](scripts/generate-fixtures.py) additionally requires Python 3
+and native FFmpeg with the features listed in that script. Review changed fixture
+hashes before accepting a regenerated inventory.
 
 ## License
 

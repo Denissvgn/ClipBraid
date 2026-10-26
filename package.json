@@ -37,6 +37,7 @@
     "test:browser": "node scripts/run-browser-tests.mjs",
     "fixtures:generate": "python3 scripts/generate-fixtures.py",
     "check:artifacts": "node scripts/check-artifacts.mjs",
+    "check:build-isolation": "node scripts/check-build-isolation.mjs",
     "test:production": "playwright test --config playwright.production.config.mjs",
     "check:toolchain": "node scripts/check-toolchain.mjs",
     "check:mcp": "tsc -p tsconfig.mcp.json && node --check mcp-server/index.js && node --check mcp-server/lib.js && node --check mcp-server/tools.js",

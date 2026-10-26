@@ -1,7 +1,7 @@
 import { chromium } from "@playwright/test";
 import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { repositoryState } from "./source-identity.mjs";
 import os from "node:os";
 const [input, folder, quality = "draft", plan = "auto", timeout = "420000"] = process.argv.slice(2);
 async function writeSummary(page) {
@@ -52,7 +52,7 @@ try {
     await download.saveAs(`${folder}/output.mp4`); const bytes = await readFile(`${folder}/output.mp4`);
     received = { bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"), failure: await download.failure() };
   }
-  const result = { commit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+  const result = { ...repositoryState(),
     environment: { node: process.version, browser: browser.version(), os: `${os.platform()} ${os.release()} ${os.arch()}`, acceleration: "unqualified" },
     buildId: await page.locator(".editor-app").getAttribute("data-build-id"), inputSha256: createHash("sha256").update(await readFile(input)).digest("hex"),
     quality, plan, timeoutMs: Number(timeout), state, errors, received, servedResources: resources };

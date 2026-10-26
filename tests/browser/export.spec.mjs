@@ -106,12 +106,15 @@ test("one-second repeated-source real AVC encode, AAC mux and browser download",
   expect(media.fps).toBeCloseTo(30000 / 1001, 2);
   expect(media.silence).toBeLessThan(0.005);
   expect(media.tone).toBeGreaterThan(0.08);
+  await expect(page.getByRole('button',{name:'Export video',exact:true})).toBeEnabled();
+  const job=await page.locator('#export-diagnostic-report').evaluate(element=>JSON.parse(element.textContent));
+  expect(job.outcome).toBe('download-started');expect(job.cleanupComplete).toBe(true);
   await info.attach("output-evidence", {
     body: JSON.stringify(
       {
-        jobId: `${process.env.CLIPBRAID_RUN_ID ?? "manual"}:${info.testId}`,
-        jobIdentitySource:
-          "harness-run/test identity; not a production export-job identity",
+        runId: process.env.CLIPBRAID_RUN_ID ?? "manual", testId: info.testId,
+        jobId: job.jobId, buildId: job.buildId, job,
+        jobIdentitySource: "Production export job; harness run/test identities are separate",
         bytes: bytes.length,
         sha256: createHash("sha256").update(bytes).digest("hex"),
         ...media,
