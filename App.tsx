@@ -25,6 +25,7 @@ import { useProjectRecovery } from "./components/useProjectRecovery";
 import type { RecoveryData } from "./services/recovery";
 import { mixPolicy, trackGain } from "./services/mixing";
 import { BUILD_ID } from "./services/buildIdentity";
+import { BRAND, defaultProjectFilename } from "./services/brand";
 import {
   activeIntervals,
   clampPlayhead,
@@ -696,14 +697,10 @@ export default function App() {
       const base64 = await blobToBase64(
         new Blob([json], { type: "application/json" }),
       );
-      const stamp = new Date()
-        .toISOString()
-        .replace(/[:.]/g, "-")
-        .slice(0, 16);
       const accepted = await Flow.download({
         base64,
         mimeType: "application/json",
-        filename: `clipbraid_project_${stamp}.json`,
+        filename: defaultProjectFilename(),
       });
       if (!accepted) throw new Error("Project download was not acknowledged.");
       sysLog(
@@ -974,12 +971,12 @@ export default function App() {
         <button
           className="brand-lockup"
           onClick={() => setShowIntro(true)}
-          aria-label="About ClipBraid"
+          aria-label={`About ${BRAND.name}`}
         >
           <BrandMark />
           <span>
-            <span className="wordmark">ClipBraid</span>
-            <span className="brand-descriptor">browser video editor</span>
+            <span className="wordmark">{BRAND.name}</span>
+            <span className="brand-descriptor">{BRAND.descriptor}</span>
           </span>
         </button>
         <div className="project-actions" aria-label="Project actions">

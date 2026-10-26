@@ -12,6 +12,7 @@ import { scheduleAudioChunk, combineAudioChunks, type AudioSelection } from "./a
 import { activeIntervals, canvasFit, createOpacitySampler, estimateExport, exportFrameRate, frameCount,
   frameTimestamp, intervalsOverlap, sourceTimeAt, sourceWindow } from "./timeline";
 import { logEvent as sysLog } from "./journalService";
+import { BRAND } from "./brand";
 import type { MediaAsset, VisualFilter } from "../types";
 import type { ExportSnapshot, ExportContext, ExportResult } from "./exportJob";
 import { Input, Output, Mp4OutputFormat, BufferTarget, BlobSource, ALL_FORMATS,
@@ -246,13 +247,13 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
       const receipt = await resources.wait(deliverVideo({
         base64: b64,
         mimeType: "video/mp4",
-        name: "clipbraid_video.mp4", signal: resources.signal,
+        name: BRAND.videoFilename, signal: resources.signal,
       }));
       context.event(receipt.outcome, { bytes: masterBytes.byteLength });
       addLog(receipt.outcome === "download-started" ? "DOWNLOAD STARTED: browser initiated the video download" : "HOST ACCEPTED: host acknowledged the video");
       sysLog(
         "save",
-        `Video handed to save adapter: clipbraid_video.mp4 (${(b64.length / 1048576).toFixed(1)} MiB base64)`,
+        `Video handed to save adapter: ${BRAND.videoFilename} (${(b64.length / 1048576).toFixed(1)} MiB base64)`,
       );
       report({ phase: "saving", accepted: true });
       return { videoBytes: masterBytes.byteLength, delivery: receipt.outcome };

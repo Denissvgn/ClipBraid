@@ -954,6 +954,7 @@ input[type="range"]::-moz-range-thumb {
   margin-bottom: var(--space-2xl);
 }
 .intro-dialog h1 {
+  max-width: 11ch;
   font-size: var(--text-display);
   letter-spacing: -0.055em;
   line-height: 1.15;

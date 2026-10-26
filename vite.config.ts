@@ -8,6 +8,8 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { inspectArtifacts, assertProductModules } from './scripts/artifact-policy.mjs';
 import { sourceIdentity } from './scripts/source-identity.mjs';
+import brandIdentity from './brand.json';
+import packageMetadata from './package.json';
 
 export default defineConfig(({ command, mode }) => {
   const identity = sourceIdentity();
@@ -20,6 +22,14 @@ export default defineConfig(({ command, mode }) => {
     name: 'product-artifact-isolation',
     enforce: 'post',
     configResolved(config) { outputDir = resolve(config.root, config.build.outDir); projectRoot = config.root; },
+    transformIndexHtml: {
+      order: 'pre',
+      handler(html) {
+        const values: Record<string, string> = { PRODUCT_TITLE: `${brandIdentity.name} — ${brandIdentity.tagline}`, PRODUCT_DESCRIPTION: `${brandIdentity.name} — ${brandIdentity.description}`,
+          PRODUCT_THEME: brandIdentity.themeColor, PRODUCT_FAVICON: brandIdentity.favicon };
+        return html.replace(/%PRODUCT_(TITLE|DESCRIPTION|THEME|FAVICON)%/g, (_match, key: string) => values[`PRODUCT_${key}`].replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;'));
+      },
+    },
     configureServer(server) {
       // Opt-in, local development only. Never copy the private reference into public/.
       server.middlewares.use('/__fixtures__/reference.json', (_req, res) => {
@@ -65,7 +75,7 @@ export default defineConfig(({ command, mode }) => {
       }],
     },
     publicDir: false,
-    define: { __DEV_AUTOMATION__: JSON.stringify(automation), __BUILD_ID__: JSON.stringify(buildId) },
+    define: { __DEV_AUTOMATION__: JSON.stringify(automation), __BUILD_ID__: JSON.stringify(buildId), __APP_VERSION__: JSON.stringify(packageMetadata.version) },
     server: { headers: { 'Cross-Origin-Opener-Policy': 'same-origin' } },
     build: { chunkSizeWarningLimit: 4096, target: 'es2020' },
   };

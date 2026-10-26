@@ -58,3 +58,20 @@ test("production favicon resolves to the emitted SVG", async ({ page }) => {
   expect(response.headers()["content-type"]).toContain("image/svg+xml");
   expect(await response.text()).toContain("<svg");
 });
+
+test("production identity and package version remain usable with unavailable fonts",async({page},info)=>{
+  const brand=JSON.parse(await readFile("brand.json","utf8")), metadata=JSON.parse(await readFile("package.json","utf8"));
+  let blocked=0;await page.route("**/*.woff2",route=>{blocked++;return route.abort()});
+  await page.setViewportSize({width:375,height:812});await openEditor(page);
+  await expect(page).toHaveTitle(`${brand.name} — ${brand.tagline}`);
+  expect(await page.locator('meta[name="description"]').getAttribute("content")).toBe(`${brand.name} — ${brand.description}`);
+  expect(await page.locator('meta[name="theme-color"]').getAttribute("content")).toBe(brand.themeColor);
+  await expect(page.getByRole("button",{name:`About ${brand.name}`,exact:true})).toBeVisible();
+  await page.getByRole("button",{name:`About ${brand.name}`,exact:true}).click();
+  await expect(page.getByRole("dialog")).toContainText(`Version ${metadata.version}.`);
+  await expect(page.getByRole("heading",{name:brand.tagline,exact:true})).toBeVisible();
+  expect(blocked).toBeGreaterThan(0);
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(375);
+  expect(await page.getByRole("dialog").innerText()).not.toMatch(/RED VOX|Director Suite|Precision Cut|Optical Check|Audio Phase OK/);
+  await page.screenshot({path:info.outputPath("brand-font-fallback.png")});
+});
