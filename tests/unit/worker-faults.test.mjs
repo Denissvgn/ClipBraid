@@ -33,6 +33,7 @@ function faultService(control = {}, timeouts = {}, options = {}) {
       }
     }
     terminate() {
+      if (control.throwTerminate) throw new Error("injected termination failure");
       this.terminated = true;
     }
   }
@@ -204,4 +205,42 @@ test("invalid WASM is rejected and a configured core never falls back to a CDN",
   await assert.rejects(service.load(), /Invalid WASM/);
   assert.equal(workers.length, 0);
   assert.ok(requests.every(url => url.startsWith("https://local.example/core/")));
+});
+
+test("a termination exception still rejects pending calls and blocks another live worker", async () => {
+  const control = { throwTerminate: false };
+  const { service, workers, urls, revoked } = faultService(control);
+  await service.load();
+  const pending = Promise.allSettled([service.readFile("pending"), service.exec(["-version"])]);
+  control.throwTerminate = true;
+  try {
+    assert.throws(() => service.terminate(), /termination failure/);
+    const result = await Promise.race([pending, new Promise(resolve => setTimeout(() => resolve(null), 20))]);
+    assert.deepEqual(result?.map(value => value.status), ["rejected", "rejected"]);
+    assert.equal(revoked.length, urls.length);
+    await assert.rejects(service.load(), /cleanup|termination/i);
+    assert.equal(workers.length, 1);
+  } finally { control.throwTerminate = false; service.terminate(); await pending; }
+  await service.load(); assert.equal(workers.length, 2); service.terminate();
+});
+
+test("boot ownership survives StrictMode replacement and releases after the final unmount", async () => {
+  const { service, workers, urls, revoked } = faultService();
+  const releaseFirst = service.retain();
+  await service.load();
+  const firstReleased = releaseFirst(), releaseNext = service.retain();
+  await firstReleased;
+  assert.equal(workers.length, 1); assert.equal(workers[0].terminated, false);
+  await releaseNext(); await releaseNext();
+  assert.equal(workers[0].terminated, true); assert.equal(revoked.length, urls.length);
+});
+
+test("initialization fallback cannot create another core when worker cleanup fails", async () => {
+  const control = { failFirstLoad: true, throwTerminate: true };
+  const { service, workers } = faultService(control);
+  try {
+    await assert.rejects(service.load(), /cleanup|termination/);
+    assert.equal(workers.length, 1);
+  } finally { control.throwTerminate = false; service.terminate(); }
+  await service.load(); assert.equal(workers.length, 2); service.terminate();
 });

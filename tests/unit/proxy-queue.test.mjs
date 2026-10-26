@@ -90,3 +90,17 @@ test("a source retired before queue acquisition fails boundedly without wedging 
   external.release(); queue.dispose();
   assert.equal(store.snapshot().sources.length, 0);
 });
+
+test("a proxy cleanup failure never exposes the failed derived preview", async () => {
+  const { store } = harness(), original = await source(store);
+  const queue = new ProxyQueue(store, async (_, key, resources) => {
+    resources.own(() => { throw new Error("injected proxy cleanup failure"); });
+    return derived(key);
+  }, 0);
+  queue.sync([clip(original)], false); await queue.idle();
+  assert.equal(queue.getSnapshot()[0].status, "failed");
+  assert.equal(queue.urlFor(original.sourceId), undefined);
+  assert.equal(store.derivedFor(original.sourceId, proxyKey(original)), undefined);
+  assert.equal(await store.bytesFor(original.sourceId).text(), "original");
+  queue.dispose();
+});

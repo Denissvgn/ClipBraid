@@ -11,6 +11,9 @@ import { decodeAudioInWorker } from "../services/audioWorker";
 import { RecoveryStore } from "../services/recovery";
 import * as mixing from "../services/mixing";
 import { Flow as platform } from "../platform";
+import App from "../App";
+import { useProjectRecovery } from "../components/useProjectRecovery";
+import { MediaSourceStore } from "../services/mediaSources";
 Object.assign(window, {
   testRuntime: {
     media, ffmpegService, timeline, audio, React, createRoot, AudioEngine,
@@ -18,5 +21,6 @@ Object.assign(window, {
     RecoveryStore,
     mixing,
     platform,
+    App, useProjectRecovery, MediaSourceStore,
   },
 });

@@ -43,7 +43,7 @@ export async function renderProxy(source: SourceAsset, key: string, resources: E
       throw new Error("Preview metadata did not match the original.");
     return { key, mimeType: "video/mp4", bytes: blob, metadata };
   } finally {
-    for (const name of ["original", "preview.mp4"]) try { await service.deleteFile(name); } catch {}
+    // The dedicated worker owns the entire temporary filesystem.
     await release();
   }
 }

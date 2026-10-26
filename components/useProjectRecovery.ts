@@ -4,7 +4,7 @@ import type { ProjectSnapshot } from "../services/project";
 import type { MediaSourceStore, SourceAsset, SourceLease } from "../services/mediaSources";
 interface Payload { snapshot: ProjectSnapshot; ui: RecoveryUI; sources: SourceAsset[]; leases: SourceLease[]; sequence: number; epoch: number }
 export function useProjectRecovery(store: MediaSourceStore, snapshot: ProjectSnapshot, ui: RecoveryUI,
-  isPlaying: boolean, onRestore: (data: RecoveryData) => Promise<boolean>) {
+  isPlaying: boolean, onRestore: (data: RecoveryData, signal: AbortSignal) => Promise<boolean>) {
   const database = useRef<RecoveryStore | null>(null);
   if (!database.current) database.current = new RecoveryStore();
   const recovery = database.current;
@@ -18,6 +18,7 @@ export function useProjectRecovery(store: MediaSourceStore, snapshot: ProjectSna
   const sequence = useRef(0), epoch = useRef(0), writing = useRef(false);
   const queued = useRef<Payload | null>(null);
   const committed = useRef<{ snapshot: ProjectSnapshot; ui: RecoveryUI } | null>(null);
+  const restoring = useRef<AbortController | null>(null);
   const release = (payload: Payload) => payload.leases.forEach(lease => lease.release());
   const report = (error: unknown) => {
     setStatus("error");
@@ -33,8 +34,12 @@ export function useProjectRecovery(store: MediaSourceStore, snapshot: ProjectSna
     } catch { /* Saving/recovery has its own error boundary; estimates are optional. */ }
   }, [recovery]);
   const initialize = useCallback(async () => {
-    const current = epoch.current;
-    setReady(false); setStatus("loading");
+    const current = ++epoch.current;
+    sequence.current++;
+    restoring.current?.abort(); restoring.current = null;
+    if (queued.current) { release(queued.current); queued.current = null; }
+    recovery.close();
+    setReady(false); setAvailable(null); setStatus("loading");
     try {
       const data = await recovery.latest();
       if (current !== epoch.current) return;
@@ -50,6 +55,7 @@ export function useProjectRecovery(store: MediaSourceStore, snapshot: ProjectSna
     void initialize();
     return () => {
       epoch.current++; recovery.close();
+      restoring.current?.abort(); restoring.current = null;
       if (queued.current) { release(queued.current); queued.current = null; }
     };
   }, [initialize, recovery]);
@@ -62,7 +68,9 @@ export function useProjectRecovery(store: MediaSourceStore, snapshot: ProjectSna
     let payload: Payload | null = first;
     while (payload) {
       const active = payload;
-      if (active.epoch !== epoch.current) { release(active); break; }
+      if (active.epoch !== epoch.current) {
+        release(active); payload = queued.current; queued.current = null; continue;
+      }
       setStatus("saving");
       try {
         const result = await recovery.commit(active.snapshot, active.sources, active.ui);
@@ -98,13 +106,26 @@ export function useProjectRecovery(store: MediaSourceStore, snapshot: ProjectSna
     return () => clearTimeout(timer);
   }, [ready, available, isPlaying, snapshot, ui, store]);
   const restore = async () => {
-    if (!available) return;
+    if (!available || restoring.current) return;
+    const controller = new AbortController(), current = epoch.current;
+    restoring.current = controller;
     setStatus("restoring");
-    if (await onRestore(available)) {
-      setAvailable(null); setReady(true); setStatus("unsaved"); setMessage("");
-    } else { setStatus("error"); setMessage("Could not restore the local draft. The current project is unchanged."); }
+    try {
+      const restored = await onRestore(available, controller.signal);
+      if (controller.signal.aborted || current !== epoch.current) return;
+      if (restored) {
+        setAvailable(null); setReady(true); setStatus("unsaved"); setMessage("");
+      } else { setStatus("error"); setMessage("Could not restore the local draft. The current project is unchanged."); }
+    } catch (error) {
+      if (!controller.signal.aborted && current === epoch.current) {
+        setStatus("error"); setMessage(`Could not restore the local draft: ${String(error)}. The current project is unchanged.`);
+      }
+    } finally { if (restoring.current === controller) restoring.current = null; }
   };
-  const continueCurrent = () => { setAvailable(null); setReady(true); setStatus("unsaved"); setMessage(""); };
+  const continueCurrent = () => {
+    restoring.current?.abort(); restoring.current = null;
+    setAvailable(null); setReady(true); setStatus("unsaved"); setMessage("");
+  };
   const cleanOlder = async () => {
     if (writing.current) return;
     const sources = [...new Set([...snapshot.mediaAssets, ...snapshot.audioTracks].map(item => item.sourceId))]

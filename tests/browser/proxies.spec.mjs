@@ -126,3 +126,18 @@ test("proxy validation follows display rotation and retains fractional frame rat
   expect(dimensions.height).toBeGreaterThan(dimensions.width);
   expect((await saveDraft(page)).mediaAssets[0].base64).toBe((await asset("rotated-av.mp4")).base64);
 });
+
+test("automatic preview optimization waits while playback is active", async ({ page }) => {
+  await openEditor(page);
+  await loadDraft(page, draft([
+    await asset("landscape-red.png", { id: "still-intro", duration: 3, originalDuration: 3 }),
+    { ...await large(), id: "large-video", startTime: 3 },
+  ]));
+  await page.getByRole("button", { name: "Play preview", exact: true }).click();
+  await expect.poll(() => page.getByRole("slider", { name: "Playhead time", exact: true }).inputValue()).not.toBe("0");
+  await page.waitForFunction(() => Number(document.querySelector('[aria-label="Playhead time"]').value) > 1);
+  expect(await page.evaluate(() => window.__clipbraidE2E.proxyState().map(job => job.status))).toEqual(["queued"]);
+  await page.getByRole("button", { name: "Pause preview", exact: true }).click();
+  await page.waitForFunction(() => window.__clipbraidE2E.proxyState()[0]?.status === "ready");
+  expect((await saveDraft(page)).mediaAssets[1].base64).toBe((await large()).base64);
+});

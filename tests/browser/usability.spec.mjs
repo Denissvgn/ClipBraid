@@ -53,3 +53,24 @@ for (const [width, height] of [[360, 800], [390, 844]]) {
     expect(await output.failure()).toBeNull();
   });
 }
+
+test("phone export diagnostics and recovery actions remain reachable at larger text sizes", async ({ page }, info) => {
+  await page.setViewportSize({ width: 360, height: 800 });
+  await openEditor(page);
+  await loadDraft(page, draft([await asset("corrupt.mp4", { name: "A clip that cannot be decoded" })]));
+  await page.evaluate(() => document.documentElement.style.fontSize = "32px");
+  await page.getByRole("button", { name: "Export video", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Couldn’t export this video" })).toBeVisible();
+  await page.getByText("Technical details", { exact: true }).click();
+  for (const name of ["Copy diagnostics", "Back to editing", "Inspect clip"]) {
+    const button = page.getByRole("button", { name, exact: true });
+    await button.scrollIntoViewIfNeeded();
+    await button.click({ trial: true });
+    const box = await button.boundingBox();
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(361);
+  }
+  await info.attach("phone-export-details", { body: await page.screenshot(), contentType: "image/png" });
+  await page.getByRole("button", { name: "Back to editing", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Export video", exact: true })).toBeEnabled();
+});

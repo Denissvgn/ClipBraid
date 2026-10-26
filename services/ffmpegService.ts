@@ -23,6 +23,8 @@ export class FFmpegService {
   private readonly assetBases: string[];
   private msgId = 0;
   private urls = new Map<Worker, string[]>();
+  private failedStops = new Set<Worker>();
+  private owners = 0;
   private callbacks = new Map<
     number,
     {
@@ -50,8 +52,23 @@ export class FFmpegService {
     });
     if (!this.assetBases.length) throw new Error("No FFmpeg core location configured.");
   }
+  /** Defer final release so a StrictMode replacement can retain the same load. */
+  retain(): () => Promise<void> {
+    this.owners++;
+    let released: Promise<void> | undefined;
+    return () => {
+      if (released) return released;
+      this.owners--;
+      return released = Promise.resolve().then(() => { if (!this.owners) this.terminate(); });
+    };
+  }
   load(onLog?: (msg: string) => void): Promise<void> {
     if (onLog) this.logCb = onLog;
+    // A failed termination must not leave an old core alive beside a retry.
+    for (const worker of this.failedStops) {
+      const error = this.reset(worker, new Error("Retrying FFmpeg worker cleanup."));
+      if (error) return Promise.reject(error);
+    }
     if (this.loaded && this.worker) return Promise.resolve();
     if (!this.loading) {
       const controller = new AbortController();
@@ -76,13 +93,16 @@ export class FFmpegService {
   }
   /** Abort fetch/init and settle all operations before an explicit retry. */
   terminate(reason = new Error("FFmpeg stopped; retry media tools.")): void {
+    const workers = new Set([...this.failedStops, ...(this.worker ? [this.worker] : [])]);
     this.loadController?.abort(reason);
     this.loadController = null;
     this.loading = null;
-    if (this.worker) this.reset(this.worker, reason);
+    let failure: Error | undefined;
+    for (const worker of workers) failure = this.reset(worker, reason) ?? failure;
+    if (failure) throw failure;
   }
-  private reset(worker: Worker, error: Error) {
-    if (this.worker !== worker && !this.urls.has(worker)) return;
+  private reset(worker: Worker, error: Error): Error | undefined {
+    if (this.worker !== worker && !this.urls.has(worker) && !this.failedStops.has(worker)) return;
     if (this.worker === worker) {
       this.worker = null;
       this.loaded = false;
@@ -90,15 +110,21 @@ export class FFmpegService {
     worker.onmessage = null;
     worker.onerror = null;
     worker.onmessageerror = null;
-    worker.terminate();
+    let failure: Error | undefined;
+    try { worker.terminate(); this.failedStops.delete(worker); }
+    catch (cause) {
+      failure = new Error(`FFmpeg worker cleanup failed: ${String(cause)}`);
+      this.failedStops.add(worker);
+    }
     for (const [id, callback] of this.callbacks) {
       if (callback.worker !== worker) continue;
       clearTimeout(callback.timer);
       this.callbacks.delete(id);
-      callback.reject(error);
+      callback.reject(failure ?? error);
     }
     this.urls.get(worker)?.forEach((url) => URL.revokeObjectURL(url));
     this.urls.delete(worker);
+    return failure;
   }
   private async loadWorker(signal: AbortSignal): Promise<void> {
     let error: unknown;
@@ -175,13 +201,15 @@ export class FFmpegService {
         return;
       } catch (cause) {
         error = cause;
+        let cleanupError: Error | undefined;
         if (worker)
-          this.reset(
+          cleanupError = this.reset(
             worker,
             cause instanceof Error ? cause : new Error(String(cause)),
           );
         else urls.forEach((url) => URL.revokeObjectURL(url));
         if (signal.aborted) throw signal.reason;
+        if (cleanupError) throw cleanupError;
       }
     }
     throw new Error(

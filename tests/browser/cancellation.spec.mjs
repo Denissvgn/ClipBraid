@@ -103,3 +103,30 @@ test("a stalled native encoder hits its deadline, terminates and permits retry",
   await page.evaluate(() => window.__clipbraidE2E.exportDeadlines({}));
   await healthyExport(page);
 });
+
+test("completed exports terminate their mux worker without waiting for filesystem cleanup replies", async ({ page }) => {
+  await page.addInitScript(() => {
+    const Native = window.Worker; window.cleanupWorkers = []; window.blockedDeletes = 0;
+    window.Worker = function (...args) {
+      const worker = new Native(...args), post = worker.postMessage.bind(worker), stop = worker.terminate.bind(worker);
+      worker.stopped = false;
+      worker.terminate = () => { worker.stopped = true; stop(); };
+      worker.postMessage = (message, ...rest) => {
+        if (message.type === "DELETE_FILE") { window.blockedDeletes++; return; }
+        return post(message, ...rest);
+      };
+      window.cleanupWorkers.push(worker); return worker;
+    };
+    window.Worker.prototype = Native.prototype;
+  });
+  await openEditor(page); await loadDraft(page, draft([await asset("landscape-red.png")]));
+  await page.getByRole("button", { name: "draft", exact: true }).click();
+  for (let cycle = 0; cycle < 2; cycle++) {
+    const received = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Export video", exact: true }).click();
+    expect(await (await received).failure()).toBeNull();
+    await expect(page.getByRole("button", { name: "Export video", exact: true })).toBeEnabled({ timeout: 5000 });
+    expect(await page.evaluate(() => window.cleanupWorkers.every(worker => worker.stopped))).toBe(true);
+  }
+  expect(await page.evaluate(() => window.blockedDeletes)).toBe(0);
+});

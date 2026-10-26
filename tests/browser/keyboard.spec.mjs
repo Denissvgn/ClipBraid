@@ -70,3 +70,27 @@ test("browser accessibility tree names every exposed control", async ({ page, co
   expect(controls.filter(node => !node.name?.value).map(node => node.role.value)).toEqual([]);
   await info.attach("accessible-controls", { body: JSON.stringify(controls.map(node => ({ role: node.role.value, name: node.name.value }))), contentType: "application/json" });
 });
+
+test("selecting a clip from expanded preview exposes and focuses its settings", async ({ page }) => {
+  await openEditor(page);
+  await loadDraft(page, draft([await asset("landscape-red.png")]));
+  const clip = page.getByRole("button", { name: "Edit landscape-red.png", exact: true });
+  // Cover a new selection and reselecting an already selected clip.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await page.getByRole("button", { name: "Expand preview", exact: true }).click();
+    await expect(page.getByRole("complementary")).toHaveCount(0);
+    await clip.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("complementary", { name: "Clip settings" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Close clip settings", exact: true })).toBeFocused();
+  }
+  await page.getByRole("button", { name: "Close clip settings", exact: true }).click();
+  await expect(clip).toBeFocused();
+  await loadDraft(page, draft([await asset("corrupt.mp4")]));
+  await page.getByRole("button", { name: "Expand preview", exact: true }).click();
+  await page.getByRole("button", { name: "Export video", exact: true }).click();
+  await page.getByRole("button", { name: "Inspect clip", exact: true }).press("Enter");
+  await expect(page.getByRole("button", { name: "Close clip settings", exact: true })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "Add visuals", exact: true })).toBeFocused();
+});

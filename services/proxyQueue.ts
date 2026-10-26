@@ -20,15 +20,15 @@ export class ProxyQueue {
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private publish() { this.state = [...this.jobs.values()].map(job => ({ ...job })); for (const listener of this.listeners) listener(); }
   urlFor = (id: string) => this.previews.get(id)?.url;
-  sync(assets: MediaAsset[], exporting: boolean) {
+  sync(assets: MediaAsset[], busy: boolean) {
     this.references = new Set(assets.filter(asset => asset.type === "video").map(asset => asset.sourceId));
-    this.paused = exporting;
+    this.paused = busy;
     for (const [id, lease] of this.previews) if (!this.references.has(id)) {
       lease.release(); this.previews.delete(id);
       const source = this.store.get(id); if (source) this.store.dropDerived(id, proxyKey(source));
     }
     for (const id of this.jobs.keys()) if (!this.references.has(id)) this.jobs.delete(id);
-    if (this.current && (exporting || !this.references.has(this.current.sourceId))) this.current.resources.abort();
+    if (this.current && (busy || !this.references.has(this.current.sourceId))) this.current.resources.abort();
     for (const asset of assets) if (asset.type === "video" && Math.max(asset.sourceWidth ?? 0, asset.sourceHeight ?? 0) > 1280) this.enqueue(asset);
     this.publish(); this.schedule();
   }
@@ -88,11 +88,17 @@ export class ProxyQueue {
         Math.max(metadata.width, metadata.height) > 720 || metadata.rotation !== 0 || metadata.hasAudio || metadata.fps > 30.01)
         throw new Error("Invalid preview cache entry.");
       if (used + derived.bytes.size > this.budget) throw new Error("Preview cache is full. Original media remains available.");
+      // Publish a preview only after all work that produced it has closed.
+      await resources.close();
+      resources.signal.throwIfAborted();
+      if (!this.references.has(source.sourceId)) return;
       this.store.attachDerived(source.sourceId, derived);
       this.previews.get(source.sourceId)?.release();
       this.previews.set(source.sourceId, this.store.acquireDerived(source.sourceId, key));
       job.status = "ready"; delete job.error;
     } catch (error) {
+      this.previews.get(source.sourceId)?.release(); this.previews.delete(source.sourceId);
+      this.store.dropDerived(source.sourceId, proxyKey(source));
       if (resources.signal.aborted && resources.signal.reason?.name === "AbortError") {
         if (job.status === "running") job.status = "queued";
       } else {

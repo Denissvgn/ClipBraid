@@ -266,8 +266,8 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
 
 
   } finally {
-    for (const name of ["seg1.mp4", "seg2.mp4", "mix.wav", "list.txt", "joined.mp4", "master.mp4"]) {
-      try { await ffmpegService.deleteFile(name); } catch { /* worker may have reset */ }
-    }
+    // This worker and its in-memory filesystem belong to this job. Termination
+    // discards every file without waiting for more replies from a stalled core.
+    await releaseFFmpeg();
   }
 }

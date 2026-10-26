@@ -130,3 +130,111 @@ test("schema upgrade abort rolls back and concurrent writers cannot overwrite a 
   expect(result.conflict).toContain("another tab");
   expect(result.playhead).toBe(0.5);
 });
+
+test("keeping the current project cancels an in-flight local restore", async ({ page }) => {
+  await openEditor(page); await loadDraft(page, draft([await asset("landscape-red.png")]));
+  await savedLocally(page);
+  await page.reload(); await page.getByRole("button", { name: "Start editing" }).click();
+  await expect(page.getByRole("button", { name: "Restore local revision", exact: true })).toBeVisible();
+  await loadDraft(page, draft([await asset("portrait-blue.png")]));
+  await page.evaluate(() => {
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    let blocked = false;
+    crypto.subtle.digest = async (...args) => {
+      if (!blocked) {
+        blocked = true; window.restoreDigestBlocked = true;
+        await new Promise(resolve => { window.releaseRestoreDigest = resolve; });
+      }
+      return digest(...args);
+    };
+  });
+  await page.getByRole("button", { name: "Restore local revision", exact: true }).click();
+  await page.waitForFunction(() => window.restoreDigestBlocked);
+  await page.getByRole("button", { name: "Keep current project", exact: true }).click();
+  await page.evaluate(() => window.releaseRestoreDigest());
+  await expect(page.getByRole("button", { name: "Edit landscape-red.png", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Edit portrait-blue.png", exact: true })).toBeVisible();
+  await savedLocally(page);
+  expect((await saveDraft(page)).mediaAssets[0].name).toBe("portrait-blue.png");
+  await expect(page.locator('[data-editor-status="LOAD ERROR"]')).toHaveCount(0);
+});
+
+test("a rejected local restore stays recoverable without an unhandled rejection", async ({ context }) => {
+  const page = await openProbe(context);
+  await page.evaluate(async () => {
+    const runtime = window.testRuntime;
+    const snapshot = { mediaAssets: [], audioTracks: [], aspectRatio: "16:9", fitMode: "contain", transitionDuration: 0.5, currentTime: 0 };
+    const ui = { exportQuality: "draft", zoom: 40, showSafeZones: false, isTheaterMode: false };
+    const persisted = new runtime.RecoveryStore();
+    await persisted.latest(); await persisted.commit(snapshot, [], ui); persisted.close();
+    const store = new runtime.MediaSourceStore(), host = document.createElement("div"); document.body.append(host);
+    window.recoveryRoot = runtime.createRoot(host);
+    function RecoveryView() {
+      window.recoveryHook = runtime.useProjectRecovery(store, snapshot, ui, false, async () => { throw new Error("injected restore failure"); });
+      return null;
+    }
+    window.recoveryRoot.render(runtime.React.createElement(RecoveryView));
+  });
+  try {
+    await page.waitForFunction(() => window.recoveryHook?.status === "choice");
+    const rejection = await page.evaluate(() => window.recoveryHook.restore().then(() => null, error => String(error)));
+    expect(rejection).toBeNull();
+    await expect.poll(() => page.evaluate(() => window.recoveryHook.status)).toBe("error");
+    expect(await page.evaluate(() => !!window.recoveryHook.available)).toBe(true);
+  } finally { await page.evaluate(() => window.recoveryRoot.unmount()); }
+});
+
+test("re-reading local recovery ignores an older autosave acknowledgement", async ({ context }) => {
+  const page = await openProbe(context);
+  await page.evaluate(async () => {
+    const runtime = window.testRuntime;
+    const snapshot = { mediaAssets: [], audioTracks: [], aspectRatio: "16:9", fitMode: "cover", transitionDuration: 0.5, currentTime: 0 };
+    const ui = { exportQuality: "draft", zoom: 40, showSafeZones: false, isTheaterMode: false };
+    const persisted = new runtime.RecoveryStore();
+    await persisted.latest(); await persisted.commit({ ...snapshot, fitMode: "contain" }, [], ui); persisted.close();
+    const commit = runtime.RecoveryStore.prototype.commit;
+    window.originalRecoveryCommit = commit;
+    let hold = true;
+    runtime.RecoveryStore.prototype.commit = async function (...args) {
+      const result = await commit.apply(this, args);
+      if (hold) {
+        hold = false;
+        await new Promise(resolve => { window.releaseOldAutosave = resolve; });
+        window.oldAutosaveReturned = true;
+      }
+      return result;
+    };
+    const store = new runtime.MediaSourceStore(), host = document.createElement("div"); document.body.append(host);
+    window.recoveryRoot = runtime.createRoot(host);
+    window.recoveryTestSnapshot = snapshot; window.recoveryTestUI = ui;
+    function RecoveryView() {
+      window.recoveryHook = runtime.useProjectRecovery(store, snapshot, ui, false, async () => false);
+      return null;
+    }
+    window.recoveryRoot.render(runtime.React.createElement(RecoveryView));
+  });
+  try {
+    await page.waitForFunction(() => window.recoveryHook?.status === "choice");
+    await page.evaluate(() => window.recoveryHook.continueCurrent());
+    await page.waitForFunction(() => !!window.releaseOldAutosave);
+    await page.evaluate(async () => {
+      const writer = new window.testRuntime.RecoveryStore();
+      try {
+        await writer.latest();
+        await window.originalRecoveryCommit.call(writer, { ...window.recoveryTestSnapshot, aspectRatio: "1:1" }, [], window.recoveryTestUI);
+      } finally { writer.close(); }
+      await window.recoveryHook.retry();
+    });
+    await page.waitForFunction(() => window.recoveryHook.status === "choice" && window.recoveryHook.revision === 3);
+    await page.evaluate(async () => {
+      window.releaseOldAutosave();
+      await new Promise(resolve => setTimeout(resolve, 100));
+    });
+    expect(await page.evaluate(() => ({ status: window.recoveryHook.status, revision: window.recoveryHook.revision }))).toEqual({ status: "choice", revision: 3 });
+  } finally {
+    await page.evaluate(() => {
+      window.releaseOldAutosave?.(); window.recoveryRoot.unmount();
+      window.testRuntime.RecoveryStore.prototype.commit = window.originalRecoveryCommit;
+    });
+  }
+});

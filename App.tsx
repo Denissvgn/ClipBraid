@@ -219,11 +219,18 @@ export default function App() {
   const clipTriggerRef = useRef<HTMLElement | null>(null);
   const addVisualRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
-    if (selectedAssetId) clipSettingsCloseRef.current?.focus();
-  }, [selectedAssetId]);
+    if (selectedAssetId && !isTheaterMode) clipSettingsCloseRef.current?.focus();
+  }, [selectedAssetId, isTheaterMode]);
+  const selectClip = (id: string) => {
+    clipTriggerRef.current = document.activeElement as HTMLElement | null;
+    setIsTheaterMode(false);
+    setSelectedAssetId(id);
+    if (id === selectedAssetId && !isTheaterMode) clipSettingsCloseRef.current?.focus();
+  };
   const closeClipSettings = () => {
     setSelectedAssetId(null);
-    clipTriggerRef.current?.focus();
+    const opener = clipTriggerRef.current?.isConnected ? clipTriggerRef.current : addVisualRef.current;
+    opener?.focus();
   };
 
   const cleanupRef = useRef<{
@@ -252,6 +259,7 @@ export default function App() {
   const jobDiagnostics = useJobDiagnostics(exportState);
   const isExporting = exportState.active;
   const exportFailed = exportState.phase === "failed";
+  const previewWorkPaused = isPlaying || isExporting || !exportState.cleanupComplete;
   useEffect(() => {
     if (exportState.phase === "complete") setStatus("READY");
     if (exportState.phase === "cancelled") setStatus("EXPORT CANCELLED");
@@ -268,7 +276,7 @@ export default function App() {
     (id: string) => proxyQueue.urlFor(id) || storeRef.current!.urlFor(id),
     [proxyQueue, proxyState],
   );
-  useEffect(() => { proxyQueue.sync(mediaAssets, isExporting); }, [proxyQueue, mediaAssets, isExporting]);
+  useEffect(() => { proxyQueue.sync(mediaAssets, previewWorkPaused); }, [proxyQueue, mediaAssets, previewWorkPaused]);
 
   useEffect(() => {
     cleanupRef.current = { mediaAssets, audioTracks };
@@ -294,8 +302,12 @@ export default function App() {
     });
   }, [exportJobs, projectWork]);
   useEffect(() => {
+    const release = ffmpegService.retain();
     void loadMediaTools();
-    return () => { bootAttemptRef.current++; };
+    return () => {
+      bootAttemptRef.current++;
+      void release().catch(error => logEvent("error", `Media tools cleanup failed: ${String(error)}`));
+    };
   }, [loadMediaTools]);
   // The pin-sync effect owns source release: commits pre-pin additions so URLs
   // exist at first render, and unreferenced sources are released only after
@@ -833,7 +845,7 @@ export default function App() {
       return true;
     } catch (err) {
       tx.rollback();
-      if (!work.isCurrent()) return false;
+      if (!work.isCurrent() || work.signal.aborted) return false;
       setStatus("LOAD ERROR");
       setMediaNotice({ category: "project", message: "Could not open this project. Your current project is still available." });
       sysLog("error", `Project load failed: ${String(err).slice(0, 120)}`);
@@ -854,11 +866,19 @@ export default function App() {
       setStatus("LOAD ERROR"); sysLog("error", `Project load failed: ${String(error).slice(0, 120)}`); return false;
     } finally { if (!request) work.finish(); }
   };
-  async function restoreLocal(data: RecoveryData) {
+  async function restoreLocal(data: RecoveryData, signal: AbortSignal) {
     const work = projectWork.beginLoad();
-    try { return await loadProjectState(data.record.snapshot, data.sources, work,
-      { filename: data.record.ui.projectFilename, ui: data.record.ui }); }
-    finally { work.finish(); }
+    const cancel = () => {
+      work.cancel(signal.reason);
+      if (work.isCurrent() && !projectWork.busy) setStatus("READY");
+    };
+    signal.addEventListener("abort", cancel, { once: true });
+    try {
+      signal.throwIfAborted();
+      return await loadProjectState(data.record.snapshot, data.sources, work,
+        { filename: data.record.ui.projectFilename, ui: data.record.ui });
+    }
+    finally { signal.removeEventListener("abort", cancel); work.finish(); }
   }
   const handleLoadProject = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1182,7 +1202,7 @@ export default function App() {
               onCancel={exportJobs.cancel} onRetry={handleExport} onClose={exportJobs.dismissFailure}
               onSaveProject={() => void handleSaveProject()}
               onInspect={mediaAssets.some(asset => asset.id === exportState.failure?.assetId) ? () => {
-                exportJobs.dismissFailure(); setSelectedAssetId(exportState.failure!.assetId!);
+                exportJobs.dismissFailure(); selectClip(exportState.failure!.assetId!);
               } : undefined}
             />}
           </div>
@@ -1579,10 +1599,11 @@ export default function App() {
                     <h3>Preview performance</h3>
                     <p className="helper-text" role="status">
                       {proxyState.filter(job => job.status === "ready").length} optimized previews.
-                      {proxyState.some(job => job.status === "queued" || job.status === "running") ? " Optimizing while idle…" : ""}
+                      {proxyState.some(job => job.status === "running") ? " Optimizing preview…" :
+                        proxyState.some(job => job.status === "queued") ? (previewWorkPaused ? " Preview optimization is paused." : " Optimization queued.") : ""}
                       {" "}Project files, original sound and exports use your originals.
                     </p>
-                    <button className="button secondary" onClick={() => proxyQueue.request(mediaAssets)} disabled={isExporting}>Optimize previews</button>
+                    <button className="button secondary" onClick={() => proxyQueue.request(mediaAssets)} disabled={isExporting || !exportState.cleanupComplete}>Optimize previews</button>
                     {proxyState.some(job => job.status === "queued" || job.status === "running") &&
                       <button className="button secondary" onClick={proxyQueue.cancel}>Cancel optimization</button>}
                     {proxyState.filter(job => job.status === "failed").map(job => <div key={job.sourceId}>
@@ -1675,11 +1696,7 @@ export default function App() {
           onDeleteAudio={handleDeleteAudio}
           onMoveMedia={handleMoveMedia}
           onToggleMute={handleToggleMute}
-          onSelectAsset={id => {
-            clipTriggerRef.current = document.activeElement as HTMLElement;
-            setSelectedAssetId(id);
-            if (id === selectedAssetId) clipSettingsCloseRef.current?.focus();
-          }}
+          onSelectAsset={selectClip}
         />
       </section>
       <footer className="editor-statusbar">
