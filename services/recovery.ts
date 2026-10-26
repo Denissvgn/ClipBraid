@@ -1,9 +1,10 @@
 import { validateProjectMetadata, type ProjectSnapshot } from "./project";
 import { sourceChecksum, type SourceAsset } from "./mediaSources";
+import { normalizeProjectFilename } from "./projectNames";
 export const RECOVERY_DATABASE = "clipbraid-local-projects";
 const MAX_BYTES = 128 * 1024 * 1024;
 interface Reference { sourceId: string; key: string; sha256: string; mimeType: string; byteLength: number }
-export interface RecoveryUI { exportQuality: "draft" | "standard" | "high"; zoom: number; showSafeZones: boolean; isTheaterMode: boolean }
+export interface RecoveryUI { exportQuality: "draft" | "standard" | "high"; zoom: number; showSafeZones: boolean; isTheaterMode: boolean; projectFilename?: string }
 export interface LocalRevision {
   revision: number; formatVersion: 1 | 2; savedAt: number; snapshot: ProjectSnapshot;
   references: Reference[]; ui: RecoveryUI;
@@ -17,7 +18,10 @@ function validateUI(ui: RecoveryUI): RecoveryUI {
     !Number.isFinite(ui.zoom) || ui.zoom < 16 || ui.zoom > 100 ||
     typeof ui.showSafeZones !== "boolean" || typeof ui.isTheaterMode !== "boolean")
     throw new Error("Invalid local editor settings.");
-  return { exportQuality: ui.exportQuality, zoom: ui.zoom, showSafeZones: ui.showSafeZones, isTheaterMode: ui.isTheaterMode };
+  if (ui.projectFilename !== undefined && normalizeProjectFilename(ui.projectFilename) !== ui.projectFilename)
+    throw new Error("Invalid local project filename.");
+  return { exportQuality: ui.exportQuality, zoom: ui.zoom, showSafeZones: ui.showSafeZones, isTheaterMode: ui.isTheaterMode,
+    ...(ui.projectFilename ? { projectFilename: ui.projectFilename } : {}) };
 }
 
 /** One atomic head/revision/Blob commit; failed transactions preserve the old head. */

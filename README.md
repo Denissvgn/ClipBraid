@@ -35,7 +35,10 @@ be retried in the editor.
    project; **Restore local revision** recovers a browser autosave.
 
 Track volumes share the same overlap headroom in preview and export. New project
-files use format version 2; unversioned and version 1 drafts remain readable.
+files use format version 2; unversioned RED VOX and version 1 drafts remain
+readable. A loaded project keeps its chosen basename when saved; unsafe filename
+characters are sanitized. These readers
+and existing developer-tool identifiers remain compatible throughout the 2.x line.
 
 Exports are resized/re-encoded to the chosen 480p/720p profile at up to 30 fps SDR.
 File sizes are advisory bitrate estimates; video handoff is capped at 96 MiB and
@@ -48,6 +51,8 @@ Local autosave offers browser revision recovery. Keep originals and download a
 separate project backup; browser storage can be removed externally. Undo is not
 available yet. The browser recorder supports early stop and cancel; host recording
 requires explicit stop/cancel hooks. Unsupported host capabilities are reported.
+Keep the same site origin when upgrading to retain local revisions. Download a
+project file before moving to another host or domain; open that file on the new site.
 
 This is an experimental editor. Physical browser/device/Flow support and broader
 media qualification remain in progress.

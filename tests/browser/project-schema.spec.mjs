@@ -60,6 +60,8 @@ test("an unversioned legacy draft loads and re-saves as schema version 2", async
   page,
 }) => {
   await openEditor(page);
+  const untitled=page.waitForEvent("download");await saveDraft(page);
+  expect((await untitled).suggestedFilename()).toMatch(/^clipbraid_project_.*\.json$/);
   const video = await asset("bars-fractional-av.mp4", {
     id: "clip-a",
     duration: 0.5,
@@ -90,8 +92,11 @@ test("an unversioned legacy draft loads and re-saves as schema version 2", async
     transitionDuration: 0.25,
     currentTime: 0.5,
   };
-  await loadDraft(page, legacy);
+  await page.locator('input[accept=".json"]').setInputFiles({name:"My RED VOX cut.json",mimeType:"application/json",buffer:Buffer.from(JSON.stringify(legacy))});
+  await expect(page.locator('[data-editor-status="READY"]')).toBeVisible();
+  const named = page.waitForEvent("download");
   const saved = await saveDraft(page);
+  expect((await named).suggestedFilename()).toBe("My RED VOX cut.json");
   expect(saved.schemaVersion).toBe(2);
   expect(saved.currentTime).toBe(0.5);
   expect(saved.fitMode).toBe("cover");
@@ -107,4 +112,14 @@ test("an unversioned legacy draft loads and re-saves as schema version 2", async
     mediaId: "song",
     startTime: 0.25,
   });
+  await expect(page.locator('[data-autosave-status="saved"]')).toBeVisible();
+  await page.locator('input[accept=".json"]').setInputFiles({name:"Rejected replacement.json",mimeType:"application/json",buffer:Buffer.from("{broken")});
+  await expect(page.locator('[data-editor-status="LOAD ERROR"]')).toBeVisible();
+  const unchangedName=page.waitForEvent("download");expect(await saveDraft(page)).toEqual(saved);
+  expect((await unchangedName).suggestedFilename()).toBe("My RED VOX cut.json");
+  await page.reload();await page.getByRole("button",{name:"Start editing",exact:true}).click();
+  await page.getByRole("button",{name:"Restore local revision",exact:true}).click();
+  await expect(page.locator('[data-editor-status="READY"]')).toBeVisible();
+  const recoveredName=page.waitForEvent("download");expect(await saveDraft(page)).toEqual(saved);
+  expect((await recoveredName).suggestedFilename()).toBe("My RED VOX cut.json");
 });

@@ -287,13 +287,16 @@ test("single-flight saves keep leased snapshots through project replacement and 
   await expect(
     page.getByRole("button", { name: "Edit landscape-red.png", exact: true }),
   ).toBeVisible();
-  const savedOriginal = await readDownload(await replacementSave);
+  const originalDownload = await replacementSave;
+  expect(originalDownload.suggestedFilename()).toBe("synthetic.json");
+  const savedOriginal = await readDownload(originalDownload);
   expect(savedOriginal.mediaAssets.map((clip) => clip.id)).toEqual(["clip-a"]);
   expect(savedOriginal.mediaAssets[0].base64).toBe(original.base64);
   expect(downloads).toHaveLength(1); // the overlapping click did not start a save
   await setDelay(false);
 
   const currentReplacement = await saveDraft(page);
+  expect(downloads.at(-1).suggestedFilename()).toBe("transaction.json");
   expect(currentReplacement.mediaAssets.map((clip) => clip.id)).toEqual([
     "photo-b",
   ]);

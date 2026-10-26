@@ -26,6 +26,7 @@ import type { RecoveryData } from "./services/recovery";
 import { mixPolicy, trackGain } from "./services/mixing";
 import { BUILD_ID } from "./services/buildIdentity";
 import { BRAND, defaultProjectFilename } from "./services/brand";
+import { normalizeProjectFilename } from "./services/projectNames";
 import {
   activeIntervals,
   clampPlayhead,
@@ -158,6 +159,7 @@ export default function App() {
   const [showIntro, setShowIntro] = useState(true);
   const [mediaAssets, setMediaAssets] = useState<MediaAsset[]>([]);
   const [audioTracks, setAudioTracks] = useState<AudioFragment[]>([]);
+  const [projectFilename, setProjectFilename] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [zoom, setZoom] = useState(40);
@@ -291,8 +293,9 @@ export default function App() {
   );
   const localSnapshot = useMemo(() => ({ mediaAssets, audioTracks, aspectRatio, fitMode,
     transitionDuration, currentTime }), [mediaAssets, audioTracks, aspectRatio, fitMode, transitionDuration, currentTime]);
-  const localUI = useMemo(() => ({ exportQuality, zoom, showSafeZones, isTheaterMode }),
-    [exportQuality, zoom, showSafeZones, isTheaterMode]);
+  const localUI = useMemo(() => ({ exportQuality, zoom, showSafeZones, isTheaterMode,
+    ...(projectFilename ? { projectFilename } : {}) }),
+    [exportQuality, zoom, showSafeZones, isTheaterMode, projectFilename]);
   const recovery = useProjectRecovery(storeRef.current, localSnapshot, localUI, isPlaying, restoreLocal);
   const recoveryStateRef = useRef(recovery); recoveryStateRef.current = recovery;
   const exportEstimate = useMemo(
@@ -673,6 +676,7 @@ export default function App() {
     // leased before the first await, so replacing or deleting the project
     // mid-save retires pins but cannot purge the bytes this save is reading.
     const snapshot = {
+      projectFilename,
       mediaAssets,
       audioTracks,
       aspectRatio,
@@ -700,7 +704,7 @@ export default function App() {
       const accepted = await Flow.download({
         base64,
         mimeType: "application/json",
-        filename: defaultProjectFilename(),
+        filename: snapshot.projectFilename || defaultProjectFilename(),
       });
       if (!accepted) throw new Error("Project download was not acknowledged.");
       sysLog(
@@ -787,12 +791,14 @@ export default function App() {
       return false;
     }
   };
-  const loadProjectText = async (text: string): Promise<boolean> => {
+  const loadProjectText = async (text: string, filename?: string): Promise<boolean> => {
     try {
       const data = parseProject(text);
-      return await loadProjectState(data, data.sources.map(source => ({
+      const loaded = await loadProjectState(data, data.sources.map(source => ({
         sourceId: source.sourceId, bytes: base64ToBlob(source.base64, source.mimeType), mimeType: source.mimeType,
       })));
+      if (loaded) setProjectFilename(normalizeProjectFilename(filename));
+      return loaded;
     } catch (error) {
       setMediaNotice({ category: "project", message: "Could not open this project. Your current project is still available." });
       setStatus("LOAD ERROR"); sysLog("error", `Project load failed: ${String(error).slice(0, 120)}`); return false;
@@ -803,6 +809,7 @@ export default function App() {
     if (restored) {
       setExportQuality(data.record.ui.exportQuality); setZoom(data.record.ui.zoom);
       setShowSafeZones(data.record.ui.showSafeZones); setIsTheaterMode(data.record.ui.isTheaterMode);
+      setProjectFilename(data.record.ui.projectFilename ?? null);
     }
     return restored;
   }
@@ -814,7 +821,7 @@ export default function App() {
     // and the input is reset even when the host filesystem read rejects.
     try {
       assertProjectSize(file.size);
-      await loadProjectText(await file.text());
+      await loadProjectText(await file.text(), file.name);
     } catch (err) {
       setStatus("LOAD ERROR");
       setMediaNotice({ category: "project", message: "Could not read this project file. Your current project is still available." });
