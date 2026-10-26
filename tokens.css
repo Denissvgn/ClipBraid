@@ -6,9 +6,10 @@
   --color-surface-soft: oklch(0.947628 0.011078 123.461);
   --color-ink: oklch(0.308343 0.024643 166.033);
   --color-muted: oklch(0.482231 0.026141 159.449);
-  --color-subtle: oklch(0.527354 0.027596 154.604);
+  --color-subtle: oklch(0.51 0.027596 154.604);
+  /* Decorative separators use rule; interactive boundaries use rule-strong. */
   --color-rule: oklch(0.847537 0.017924 140.02);
-  --color-rule-strong: oklch(0.649285 0.03277 151.223);
+  --color-rule-strong: oklch(0.60 0.03277 151.223);
   --color-accent: oklch(0.32502 0.041252 185.507);
   --color-accent-hover: oklch(0.430133 0.05628 180.145);
   --color-accent-soft: oklch(0.929268 0.016767 151.094);
@@ -18,7 +19,7 @@
   --color-preview: oklch(0.245006 0.016111 168.584);
   --color-preview-ink: oklch(0.933075 0.010931 149.854);
   --color-preview-muted: oklch(0.800359 0.020721 154.802);
-  --color-preview-rule: oklch(0.495991 0.032563 157.81);
+  --color-preview-rule: oklch(0.54 0.032563 157.81);
   --color-video: oklch(0.930481 0.016416 142.555);
   --color-video-ink: oklch(0.384962 0.048625 164.685);
   --color-photo: oklch(0.931672 0.031926 82.768);
@@ -31,9 +32,9 @@
   --color-error-soft: oklch(0.953307 0.018237 43.225);
   --color-shadow: oklch(0.239932 0.024642 163.698);
   --color-transparent: transparent;
-  --font-display: "Space Grotesk Variable", sans-serif;
-  --font-body: "Geist Variable", sans-serif;
-  --font-mono: "JetBrains Mono Variable", monospace;
+  --font-display: "Space Grotesk Variable", system-ui, "Segoe UI", sans-serif;
+  --font-body: "Geist Variable", system-ui, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "SFMono-Regular", Consolas, monospace;
   --space-xs: 0.25rem;
   --space-sm: 0.5rem;
   --space-md: 0.75rem;

@@ -38,6 +38,7 @@ dialog h2 {
 }
 button,
 input,
+textarea,
 select,
 summary {
   font: inherit;
@@ -60,6 +61,7 @@ summary {
 }
 button:focus-visible,
 input:focus-visible,
+textarea:focus-visible,
 select:focus-visible,
 summary:focus-visible {
   outline: 3px solid var(--color-focus);
@@ -537,18 +539,31 @@ select,
   color: var(--color-ink);
   background: var(--color-surface);
 }
+input[type="checkbox"] {
+  accent-color: var(--color-accent);
+}
 input[type="range"] {
   appearance: none;
   width: 100%;
-  height: 4px;
-  background: var(--color-rule);
-  border-radius: 2px;
+  height: 44px;
+  background: var(--color-transparent);
   accent-color: var(--color-accent);
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  background: var(--color-rule-strong);
+  border-radius: 2px;
+}
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  background: var(--color-rule-strong);
+  border-radius: 2px;
 }
 input[type="range"]::-webkit-slider-thumb {
   appearance: none;
   width: 14px;
   height: 14px;
+  margin-top: -5px;
   border-radius: 50%;
   background: var(--color-accent);
   cursor: pointer;
@@ -723,8 +738,7 @@ input[type="range"]::-moz-range-thumb {
   height: 42px;
   background: var(--color-audio);
   color: var(--color-audio-ink);
-  border: var(--rule-width) solid
-    color-mix(in oklch, var(--color-audio-ink) 40%, var(--color-surface));
+  border: var(--rule-width) solid var(--color-rule-strong);
   border-radius: var(--radius-sm);
   padding: var(--space-sm) var(--space-sm) var(--space-lg);
   display: flex;
@@ -745,11 +759,7 @@ input[type="range"]::-moz-range-thumb {
 .tone-1 .timeline-audio {
   background: var(--color-audio-alt);
   color: var(--color-audio-alt-ink);
-  border-color: color-mix(
-    in oklch,
-    var(--color-audio-alt-ink) 40%,
-    var(--color-surface)
-  );
+  border-color: var(--color-rule-strong);
 }
 .track-empty {
   margin-left: var(--space-lg);
@@ -873,6 +883,23 @@ input[type="range"]::-moz-range-thumb {
   margin-block: var(--space-sm);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
+}
+.technical-details textarea,
+.diagnostics-list textarea {
+  padding: var(--space-sm);
+  background: var(--color-surface);
+  color: var(--color-ink);
+  border: var(--rule-width) solid var(--color-rule-strong);
+  border-radius: var(--radius-sm);
+}
+.export-overlay .button.primary {
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+  border-color: var(--color-accent-soft);
+}
+.export-overlay .button.primary:hover:not(:disabled) {
+  background: var(--color-focus-on-dark);
+  border-color: var(--color-focus-on-dark);
 }
 .diagnostics-list textarea {
   display: block;
