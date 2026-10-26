@@ -30,7 +30,7 @@ export interface ExportState {
   progress: number;
   logs: string[];
   error: string | null;
-  failure: { category: string; assetId?: string; deliveryMayHaveStarted?: boolean } | null;
+  failure: { category: string; assetId?: string; asset?: { id: string; sourceId: string; name: string; kind: "video" | "image" | "audio" }; deliveryMayHaveStarted?: boolean } | null;
   result: ExportResult | null;
   phaseResults: ExportPhaseResult[];
   cancellable: boolean;
@@ -290,9 +290,13 @@ export class ExportJobs {
       } catch (cause) {
         error = String(cause);
         const detail = cause as { category?: string; assetId?: string; deliveryMayHaveStarted?: boolean; name?: string } | null;
+        const failedVisual = snapshot.mediaAssets.find(asset => asset.id === detail?.assetId);
+        const failedAsset = failedVisual ?? snapshot.audioTracks.find(asset => asset.id === detail?.assetId);
         const lostHandoff = resources.signal.aborted && !observedReceipt && this.state.events.some(event => event.type === "delivery-started");
         update({ failure: { category: lostHandoff ? "unknown" : detail?.category ?? (detail?.name === "AbortError" && !observedReceipt ? "cancelled" : "processing"),
-          assetId: detail?.assetId, deliveryMayHaveStarted: !!observedReceipt || lostHandoff || detail?.deliveryMayHaveStarted } });
+          assetId: detail?.assetId, asset: failedAsset ? { id: failedAsset.id, sourceId: failedAsset.sourceId, name: failedAsset.name,
+            kind: failedVisual?.type ?? "audio" } : undefined,
+          deliveryMayHaveStarted: !!observedReceipt || lostHandoff || detail?.deliveryMayHaveStarted } });
         resources.abort(cause);
         context.addLog(`EXPORT STOPPED: ${error}`);
       } finally {

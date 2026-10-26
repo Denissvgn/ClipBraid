@@ -64,8 +64,11 @@ test("overload is explicit and lower volume survives save and local recovery bef
   await page.getByRole("button", { name: "Export video", exact: true }).click();
   await expect(page.locator('[data-editor-status="EXPORT ERROR"]')).toBeVisible();
   await expect(page.locator(".export-message")).toContainText("exceeds full scale");
+  await expect(page.locator(".export-message > p")).toContainText("audio mix");
+  await expect(page.getByRole("button",{name:"Review audio levels",exact:true})).toBeVisible();
   expect(downloads).toBe(0);
-  await page.getByRole("button", { name: "Back to editing", exact: true }).click();
+  await page.getByRole("button", { name: "Review audio levels", exact: true }).click();
+  await expect(page.getByRole("slider", { name: "Volume for audio 1: overload.wav", exact: true })).toBeFocused();
   await page.getByRole("slider", { name: "Volume for audio 1: overload.wav", exact: true }).fill("50");
   const received = page.waitForEvent("download");
   await page.getByRole("button", { name: "Export video", exact: true }).click();

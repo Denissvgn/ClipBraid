@@ -865,6 +865,13 @@ input[type="range"]::-moz-range-thumb {
   line-height: 1.6;
   margin: 0;
 }
+.export-message .button {
+  max-width: 100%;
+  min-width: 0;
+  white-space: normal;
+  justify-content: center;
+}
+.feedback-actions { width: 100%; min-width: 0; }
 .export-message progress {
   width: 100%;
   height: 6px;
@@ -1334,3 +1341,4 @@ select:hover:not(:disabled),
 .inspector-section .track-volume { display: grid; gap: var(--space-sm); }
 .track-volume span { overflow-wrap: anywhere; }
 .track-volume input { width: 100%; min-height: 44px; }
+.audio-settings:focus { outline: 3px solid var(--color-focus); outline-offset: 3px; }

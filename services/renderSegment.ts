@@ -99,7 +99,8 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
           streams.set(asset.id, { input, times, remaining: times.length, closed: false });
         }
       } catch (error) {
-        throw new Error(`Cannot decode ${asset.name}: ${String(error)}`);
+        if (signal?.aborted) throw signal.reason;
+        throw Object.assign(new Error(`Cannot decode ${asset.name}: ${String(error)}`), { category: "asset", assetId: asset.id });
       }
     }
     await output.start();
@@ -121,13 +122,17 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
         // This iterator owns one decoder for the clip's monotonic frame grid.
         // getSample() per frame would create/restart a decoder for every query.
         stream.iterator ??= sink.samplesAtTimestamps(stream.times)[Symbol.asyncIterator]();
-        const next = await stream.iterator.next(), sample = next.value;
+        let next;
+        try { next = await stream.iterator.next(); }
+        catch (error) {
+          if (signal?.aborted) throw signal.reason;
+          throw Object.assign(new Error(`Cannot decode ${asset.name}: ${String(error)}`), { category: "asset", assetId: asset.id });
+        }
+        const sample = next.value;
         stream.remaining--;
         trace("decode-ready", { clipId: asset.id, sourceTime: local, timelineTime: t, frame: i });
         if (!sample)
-          throw new Error(
-            `No decoded frame for ${asset.name} at ${local.toFixed(3)}s`,
-          );
+          throw Object.assign(new Error(`No decoded frame for ${asset.name} at ${local.toFixed(3)}s`), { category: "asset", assetId: asset.id });
         decoded.set(asset.id, sample);
         return sample;
       };

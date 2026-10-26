@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { loadModule } from "../source-probes.mjs";
+import { loadModule, loadDiagnostics } from "../source-probes.mjs";
 import { LOG_NAMES, LEGACY_LOG_NAMES } from "../../mcp-server/lib.js";
 import { TOOLS, validateArguments } from "../../mcp-server/tools.js";
 const { normalizeProjectFilename } = loadModule("services/projectNames.ts");
@@ -27,5 +27,5 @@ test("rebrand preserves package lock identity and the established MCP tool contr
   const project=loadModule("services/project.ts"), media=loadModule("services/mediaSources.ts");
   const recovery=loadModule("services/recovery.ts",{"./project":project,"./mediaSources":media,"./projectNames":{normalizeProjectFilename}});
   assert.equal(recovery.RECOVERY_DATABASE,"clipbraid-local-projects");
-  assert.equal(loadModule("services/diagnostics.ts").DIAGNOSTIC_KEY,"clipbraid.export-diagnostics.v1");
+  assert.equal(loadDiagnostics().DIAGNOSTIC_KEY,"clipbraid.export-diagnostics.v1");
 });

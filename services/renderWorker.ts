@@ -21,7 +21,8 @@ export async function renderInWorker(snapshot: ExportSnapshot, settings: RenderS
         if (data.type === "progress") context.setExportProgress(data.progress);
         if (data.type === "diagnostic") context.diagnostic(data.point);
         if (data.type === "result") resolve(data.bytes);
-        if (data.type === "error") reject(new Error(data.error));
+        if (data.type === "error") reject(Object.assign(new Error(data.error), { category: data.category === "asset" ? "asset" : undefined,
+          assetId: typeof data.assetId === "string" ? data.assetId : undefined }));
       };
       worker.onerror = event => { event.preventDefault(); reject(new Error(event.message || "Renderer worker failed")); };
       worker.onmessageerror = () => reject(new Error("Renderer worker message failed"));

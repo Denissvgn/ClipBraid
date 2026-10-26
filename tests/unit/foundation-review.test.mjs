@@ -68,6 +68,7 @@ test('F03: runtime and lock metadata cannot diverge while a toolchain check rema
 test('F01/F02: a harness ID or payload marker cannot substitute for job-bound decoded/delivery evidence',()=>{
   const jobId='00000000-0000-4000-8000-000000000000',buildId='a'.repeat(64)+':test';
   const value={jobId,buildId,sha256:'b'.repeat(64),bytes:2000,videoCodec:'avc',audioCodec:'aac',tone:.2,silence:0,
+    duration:1.001,width:854,height:480,fps:30000/1001,frames:[[180,180,180,255],[180,180,180,255]],
     job:{jobId,buildId,outcome:'download-started',cleanupComplete:true,input:{fingerprint:'c'.repeat(64)}}};
   assert.equal(assessSmokeEvidence(value),true);
   assert.equal(assessSmokeEvidence({...value,jobId:'run:test'}),false);

@@ -27,7 +27,7 @@ export const TOOLS = [
   },
   {
     name: 'project_state',
-    description: 'Git HEAD + status, typecheck result, dist freshness vs sources, preview-server reachability.',
+    description: 'Git HEAD/status, one shared bounded typecheck, source hash vs the recorded build, timestamps and preview reachability. Artifact integrity is a separate check.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -65,7 +65,7 @@ export function validateArguments(name, raw) {
   const args = /** @type {Record<string, any>} */ (raw);
   const schema = tool.inputSchema;
   if (Object.keys(args).some(key => !Object.hasOwn(schema.properties, key))) throw new Error('Unknown argument.');
-  for (const key of schema.required ?? []) if (!(key in args)) throw new Error(`Missing ${key}.`);
+  for (const key of schema.required ?? []) if (!Object.hasOwn(args, key)) throw new Error(`Missing ${key}.`);
   for (const [key, value] of Object.entries(args)) {
     const rule = schema.properties[key];
     if (rule.type === 'integer') {
@@ -75,7 +75,7 @@ export function validateArguments(name, raw) {
       throw new Error(`Invalid ${key} string.`);
     if (rule.enum && !rule.enum.includes(value)) throw new Error(`Unknown ${key}.`);
   }
-  if (name === 'journal_append' && (/[\r\n\x00-\x1f\x7f]/.test(args.title) || /^#{1,2}\s/m.test(args.body) || args.body.includes('\0')))
+  if (name === 'journal_append' && (/[\r\n\u2028\u2029\x00-\x1f\x7f]/.test(args.title) || /^[ \t]{0,3}#{1,2}(?:\s|$)/m.test(args.body) || args.body.includes('\0')))
     throw new Error('Use a one-line title and ### or deeper body headings.');
   return args;
 }

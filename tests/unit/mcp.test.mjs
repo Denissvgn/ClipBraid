@@ -141,7 +141,7 @@ test("journal timestamps honor configured zones including daylight saving", () =
   assert.match(insertEntry("", "title", "body",new Date("2026-01-01T00:00:00Z"),"America/New_York"), /2025-12-31 19:00 UTC-5/);
 });
 test("canonical job reports expose unknown and aborted results without legacy log dependence", () => {
-  const now=Date.now(), value={schemaVersion:1,jobId:"00000000-0000-4000-8000-000000000000",buildId:"build",outcome:"running",updatedAt:new Date(now).toISOString()};
+  const now=Date.now(), value={schemaVersion:1,jobId:"00000000-0000-4000-8000-000000000000",buildId:"a".repeat(64)+":test",phase:"rendering",cleanupComplete:false,outcome:"running",updatedAt:new Date(now).toISOString()};
   assert.equal(reportStatus(value,now).verdict,"RUNNING");
   assert.equal(reportStatus(value,now+46000).verdict,"UNKNOWN");
   assert.equal(reportStatus({...value,outcome:"aborted"},now).verdict,"ABORTED");

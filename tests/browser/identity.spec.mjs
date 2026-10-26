@@ -56,3 +56,19 @@ test("the identity and recovery actions remain usable at phone and laptop sizes"
   expect(await field.evaluate(el=>getComputedStyle(el).outlineStyle)).toBe("solid");
   await page.screenshot({path:info.outputPath("identity-phone-error.png")});
 });
+
+test("audio recovery remains reachable at phone width with enlarged fallback text",async({page},info)=>{
+  await page.setViewportSize({width:360,height:800});await page.route('**/*.woff2',route=>route.abort());
+  await openEditor(page);await loadDraft(page,draft([await asset('landscape-red.png')],[{id:'broken-audio',mediaId:'audio',name:'Broken audio',mimeType:'audio/wav',base64:'YmFk',startTime:0,duration:1}]));
+  await page.evaluate(()=>document.documentElement.style.fontSize='32px');
+  await page.getByRole('button',{name:'Export video',exact:true}).click();
+  for(const name of ['Inspect audio track','Back to editing']){
+    const button=page.getByRole('button',{name,exact:true});await button.scrollIntoViewIfNeeded();await button.click({trial:true});
+    const box=await button.boundingBox();expect(box.x).toBeGreaterThanOrEqual(0);expect(box.x+box.width).toBeLessThanOrEqual(361);
+    const panel=await page.locator('.export-overlay').boundingBox();
+    expect(box.x).toBeGreaterThanOrEqual(panel.x);expect(box.x+box.width).toBeLessThanOrEqual(panel.x+panel.width);
+  }
+  await info.attach('audio-error-phone',{body:await page.screenshot(),contentType:'image/png'});
+  await page.getByRole('button',{name:'Inspect audio track',exact:true}).click();
+  await expect(page.getByRole('button',{name:'Remove Broken audio',exact:true})).toBeFocused();
+});

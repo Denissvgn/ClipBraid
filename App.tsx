@@ -219,6 +219,13 @@ export default function App() {
   const clipSettingsCloseRef = useRef<HTMLButtonElement>(null);
   const clipTriggerRef = useRef<HTMLElement | null>(null);
   const addVisualRef = useRef<HTMLButtonElement>(null);
+  const audioSettingsRef = useRef<HTMLElement>(null);
+  const [focusAudioSettings, setFocusAudioSettings] = useState(false);
+  useEffect(() => {
+    if (!focusAudioSettings || selectedAssetId || isTheaterMode || !audioSettingsRef.current) return;
+    const control = audioSettingsRef.current.querySelector<HTMLInputElement>('input[type="range"]') ?? audioSettingsRef.current;
+    control.focus(); control.scrollIntoView({ block: "center", inline: "nearest" }); setFocusAudioSettings(false);
+  }, [focusAudioSettings, selectedAssetId, isTheaterMode]);
   useEffect(() => {
     if (selectedAssetId && !isTheaterMode) clipSettingsCloseRef.current?.focus();
   }, [selectedAssetId, isTheaterMode]);
@@ -1016,6 +1023,18 @@ export default function App() {
   const videos = mediaAssets.filter((asset) => asset.type === "video");
   const allVideoMuted =
     videos.length > 0 && videos.every((asset) => asset.muted);
+  const failedSource = exportState.failure?.asset;
+  const failedSourcePresent = !!failedSource && [...mediaAssets, ...audioTracks].some(asset => asset.id === failedSource.id && asset.sourceId === failedSource.sourceId);
+  const inspectFailedSource = () => {
+    if (!failedSource || !failedSourcePresent) return;
+    exportJobs.dismissFailure();
+    if (failedSource.kind === "audio") {
+      setIsTheaterMode(false); setSelectedAssetId(null);
+      const row = [...(timelineContainerRef.current?.querySelectorAll<HTMLElement>("[data-audio-track]") ?? [])].find(element => element.dataset.audioTrack === failedSource.id);
+      const control = row?.querySelector<HTMLButtonElement>("button");
+      control?.focus(); control?.scrollIntoView({ block: "center", inline: "nearest" });
+    } else selectClip(failedSource.id);
+  };
   const activeClip = activeIntervals(mediaAssets, currentTime).at(-1);
   const audioOnly =
     !activeClip && activeIntervals(audioTracks, currentTime).length > 0;
@@ -1142,7 +1161,7 @@ export default function App() {
       </p>}
       {exportState.phase === "cancelled" && <div className="source-notice recovery-notice" role="status">
         <span>Export cancelled. You can keep editing or retry.</span>
-        <button className="button secondary" onClick={handleExport}>Retry export</button>
+        {mediaAssets.length > 0 ? <button className="button secondary" onClick={handleExport}>Retry export</button> : <span>Add visuals or open a project before exporting again.</span>}
       </div>}
       {(recovery.available || recovery.status === "error" || recovery.status === "unavailable") && (
         <section className="source-notice recovery-notice" aria-label="Local project recovery"
@@ -1208,12 +1227,11 @@ export default function App() {
             />
             {(isExporting || exportFailed) && <ExportFeedback
               key={exportState.jobId} state={exportState}
-              assetName={[...mediaAssets, ...audioTracks].find(asset => asset.id === exportState.failure?.assetId)?.name}
+              assetName={failedSource?.name} sourcePresent={failedSource ? failedSourcePresent : undefined} canRetry={mediaAssets.length > 0}
               onCancel={exportJobs.cancel} onRetry={handleExport} onClose={exportJobs.dismissFailure}
               onSaveProject={() => void handleSaveProject()}
-              onInspect={mediaAssets.some(asset => asset.id === exportState.failure?.assetId) ? () => {
-                exportJobs.dismissFailure(); selectClip(exportState.failure!.assetId!);
-              } : undefined}
+              onInspect={failedSourcePresent ? inspectFailedSource : undefined}
+              onReviewAudio={() => { exportJobs.dismissFailure(); setIsTheaterMode(false); setSelectedAssetId(null); setFocusAudioSettings(true); }}
             />}
           </div>
           <label className="playhead-control">
@@ -1493,7 +1511,7 @@ export default function App() {
                   <h2>Make it yours</h2>
                   <Icon name="settings" />
                 </div>
-                <section className="inspector-section">
+                <section className="inspector-section audio-settings" ref={audioSettingsRef} tabIndex={-1} aria-label="Audio levels">
                   <h3>Your soundtrack</h3>
                   {soundPolicy.maxOverlap > 0 && <p className="helper-text">Mix level: {Math.round(soundPolicy.gain * 100)}%. Headroom reserves space for up to {soundPolicy.maxOverlap} enabled sounds at once.</p>}
                   <p className="helper-text">

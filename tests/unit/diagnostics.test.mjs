@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadModule } from "../source-probes.mjs";
-const { createJobReport, sanitizeReport, DiagnosticHistory, DIAGNOSTIC_KEY } = loadModule("services/diagnostics.ts");
+import { loadDiagnostics } from "../source-probes.mjs";
+const { createJobReport, sanitizeReport, DiagnosticHistory, DIAGNOSTIC_KEY } = loadDiagnostics();
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12,"0")}`;
 const state = n => ({ jobId:id(n),buildId:"a".repeat(64)+":test",phase:"failed",active:false,progress:30,cleanupComplete:true,
   startedAt:"2026-10-26T12:00:00.000Z",updatedAt:"2026-10-26T12:00:02.000Z",endedAt:"2026-10-26T12:00:02.000Z",

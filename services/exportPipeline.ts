@@ -66,7 +66,7 @@ const audioBufferToWav = (buffer: AudioBuffer): Uint8Array<ArrayBuffer> => {
     for (let c = 0; c < numCh; c++) {
       const value = chans[c][i];
       if (!Number.isFinite(value) || Math.abs(value) > 1.00001)
-        throw new Error("Audio mix exceeds full scale. Lower a track volume before exporting; the mix was not silently clipped.");
+        throw Object.assign(new Error("Audio mix exceeds full scale. Lower a track volume before exporting; the mix was not silently clipped."), { category: "audio-level" });
       const s = Math.max(-1, Math.min(1, value));
       dv.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
       off += 2;
@@ -90,7 +90,7 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
       "export",
       `Export started: ${exportQuality}, ${totalDuration.toFixed(1)}s timeline, ${mediaAssets.length} clips + ${audioTracks.length} audio tracks`,
     );
-    addLog("PASS 1/4: Initializing Parallel Visual Pipeline...");
+    addLog("PASS 1/4: Preparing visual encoding...");
     const profile = outputProfile(exportQuality, aspectRatio, totalDuration, inventory);
     report({ phase: "preparing", profile });
     const { width: targetWidth, height: targetHeight, fps, videoBitrate, audioBitrate } = profile;
@@ -100,7 +100,7 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
       `Target: ${targetWidth}x${targetHeight} @ ${fps}fps, ${Math.round(videoBitrate / 1000)} kbps (${exportQuality.toUpperCase()})`,
     );
     phase("rendering");
-    addLog(`Splitting workload into 2 parallel threads...`);
+    addLog("Selecting the visual encoder plan...");
     const mixAudio = async (signal?: AbortSignal, owned: ExportResources = new ExportResources(), onLog: (message: string) => void = () => {}): Promise<Uint8Array> => {
       const rate = 44100;
       const policy = mixPolicy(mediaAssets, audioTracks);
@@ -123,7 +123,7 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
         };
         const releaseAudio = owned?.own(stop) ?? stop;
         try {
-          const mixSource = async (sourceId: string, name: string, selection: AudioSelection, gain: number, allowSilentVideo = false) => {
+          const mixSource = async (sourceId: string, name: string, selection: AudioSelection, gain: number, allowSilentVideo = false, assetId?: string) => {
             signal?.throwIfAborted();
             const from = Math.max(selection.sourceStart, selection.sourceStart - selection.timelineStart);
             const to = Math.min(selection.sourceEnd, selection.sourceStart + selection.timelineEnd - selection.timelineStart);
@@ -136,7 +136,10 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
                 scheduleAudioChunk(offlineCtx, chunk.buffer, chunk.timestamp, selection,
                   { gain, destination: bus, onNode: node => nodes.push(node) });
               }
-            } catch (error) { throw new Error(`Cannot decode audio for ${name}: ${String(error)}`); }
+            } catch (error) {
+              if (signal?.aborted) throw signal.reason;
+              throw Object.assign(new Error(`Cannot decode audio for ${name}: ${String(error)}`), { category: "asset", assetId });
+            }
           };
           const windowEnd = Math.min(length / rate, totalDuration - offset);
           for (const asset of mediaAssets) {
@@ -144,12 +147,12 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
             const window = sourceWindow(asset);
             await mixSource(asset.sourceId, asset.name, { sourceStart: window.start,
               sourceEnd: Math.min(window.end, window.start + asset.duration),
-              timelineStart: asset.startTime - offset, timelineEnd: windowEnd }, trackGain(asset), true);
+              timelineStart: asset.startTime - offset, timelineEnd: windowEnd }, trackGain(asset), true, asset.id);
           }
           for (const track of audioTracks) {
             if (trackGain(track) === 0) continue;
             await mixSource(track.sourceId, track.name, { sourceStart: 0, sourceEnd: track.duration,
-              timelineStart: track.startTime - offset, timelineEnd: windowEnd }, trackGain(track));
+              timelineStart: track.startTime - offset, timelineEnd: windowEnd }, trackGain(track), false, track.id);
           }
           signal?.throwIfAborted();
           rendering = offlineCtx.startRendering();

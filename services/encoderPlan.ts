@@ -56,7 +56,7 @@ export async function renderVisualPlan(snapshot: ExportSnapshot, profile: Output
   let failure: unknown;
   for (let attempt = 0; attempt < plans.length; attempt++) {
     context.resources.signal.throwIfAborted();
-    if (attempt && !/encod|capacity|resource|segment|compatib|configuration/i.test(String(failure))) throw failure;
+    if (attempt && ((failure as { category?: string })?.category === "asset" || !/encod|capacity|resource|segment|compatib|configuration/i.test(String(failure)))) throw failure;
     const plan = plans[attempt], segments = frameSegments(profile, plan.count), resources = new ExportResources();
     let active = true;
     const release = context.resources.own(async () => { resources.abort(context.resources.signal.reason); await resources.close(); });

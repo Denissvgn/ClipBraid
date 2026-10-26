@@ -1,4 +1,5 @@
 // Shared pure logic: journal parse/insert + log allow-list.
+import { sanitizeReport, BUILD_ID } from "../services/reportPolicy.mjs";
 const HEADING_RE = /^##\s+(.*)$/;
 
 export function parseJournal(markdown) {
@@ -32,7 +33,11 @@ export function insertEntry(markdown, title, body, now = new Date(), timeZone = 
   const stamp = `${part("year")}-${part("month")}-${part("day")} ${part("hour")}:${part("minute")} ${part("timeZoneName").replace("GMT", "UTC")}`;
   const entry = `\n## ${stamp} \u2014 ${title}\n\n${body.trim()}\n`;
   const idx = markdown.indexOf("---\n");
-  if (idx === -1) return markdown + entry;
+  if (idx === -1) {
+    const heading = /^##\s+/m.exec(markdown);
+    if (heading) return markdown.slice(0, heading.index) + entry + markdown.slice(heading.index);
+    return markdown + entry;
+  }
   return markdown.slice(0, idx + 4) + entry + markdown.slice(idx + 4);
 }
 
@@ -92,8 +97,8 @@ export function exportStatus(logText, { mtimeMs = null, nowMs = Date.now(), maxI
 export function exportVerdict(logText, options = {}) { return exportStatus(logText, options).verdict; }
 
 export function reportStatus(value, nowMs = Date.now()) {
-  if (!value || value.schemaVersion !== 1 || !/^[a-f0-9-]{36}$/.test(value.jobId ?? "") ||
-    !["running", "failed", "cancelled", "unknown", "aborted", "download-started", "host-accepted"].includes(value.outcome))
+  value = sanitizeReport(value);
+  if (!value || !BUILD_ID.test(value.buildId))
     return { verdict: "UNKNOWN", reason: "Invalid or missing job summary.", source: "job-report" };
   const heartbeat = Date.parse(value.updatedAt), stale = !Number.isFinite(heartbeat) || nowMs - heartbeat > 45_000 || heartbeat > nowMs + 5000;
   return { verdict: value.phase === "failed" && (value.outcome !== "unknown" || value.cleanupComplete !== true) ? "FAILED" : value.phase === "cancelled" ? "CANCELLED"

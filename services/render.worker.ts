@@ -41,6 +41,7 @@ workerScope.onmessage = async ({ data }: MessageEvent<{
     const bytes = await render(start, end, index);
     workerScope.postMessage({ jobId, type: "result", bytes }, [bytes.buffer]);
   } catch (error) {
-    workerScope.postMessage({ jobId, type: "error", error: String(error) });
+    const detail = error as { category?: string; assetId?: string };
+    workerScope.postMessage({ jobId, type: "error", error: String(error), category: detail?.category, assetId: detail?.assetId });
   }
 };

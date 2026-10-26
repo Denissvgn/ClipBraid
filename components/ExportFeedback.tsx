@@ -5,11 +5,12 @@ import { Icon } from "./Icon";
 
 export const ExportFeedback: React.FC<{
   state: ExportState; assetName?: string; onCancel(): void; onRetry(): void; onClose(): void;
-  onSaveProject(): void; onInspect?: () => void;
-}> = ({ state, assetName, onCancel, onRetry, onClose, onSaveProject, onInspect }) => {
+  onSaveProject(): void; onInspect?: () => void; onReviewAudio?: () => void;
+  sourcePresent?: boolean; canRetry?: boolean;
+}> = ({ state, assetName, onCancel, onRetry, onClose, onSaveProject, onInspect, onReviewAudio, sourcePresent, canRetry }) => {
   const field = useRef<HTMLTextAreaElement>(null);
   const [copyStatus, setCopyStatus] = useState("");
-  const failed = state.phase === "failed", recovery = exportRecovery(state);
+  const failed = state.phase === "failed", recovery = exportRecovery(state, { kind: state.failure?.asset?.kind, sourcePresent, canRetry });
   const details = copyableJobDetails(state);
   const copy = async () => {
     try { await navigator.clipboard.writeText(details); setCopyStatus("Diagnostics copied."); }
@@ -24,7 +25,8 @@ export const ExportFeedback: React.FC<{
         {assetName && <p>Could not use “{assetName}”.</p>}
         <p>{recovery.message}</p>
         <div className="feedback-actions">
-          {onInspect && <button className="button secondary" onClick={onInspect}>Inspect clip</button>}
+          {onInspect && <button className="button secondary" onClick={onInspect}>{state.failure?.asset?.kind === "audio" ? "Inspect audio track" : "Inspect clip"}</button>}
+          {state.failure?.category === "audio-level" && onReviewAudio && <button className="button secondary" onClick={onReviewAudio}>Review audio levels</button>}
           {recovery.retry && <button className="button primary" onClick={onRetry}>Retry export</button>}
           {!state.cleanupComplete && <button className="button primary" onClick={onSaveProject}>Save project</button>}
           <button className="button secondary" onClick={onClose}>Back to editing</button>

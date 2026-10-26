@@ -2,6 +2,7 @@
 // their closure inputs explicitly. Fail on missing/ambiguous AST boundaries.
 import ts from "typescript";
 import { readFileSync } from "node:fs";
+import * as reportPolicy from "../services/reportPolicy.mjs";
 export function expression(file, name) {
   const text = readFileSync(file, "utf8");
   const tree = ts.createSourceFile(
@@ -62,4 +63,7 @@ export function loadDelivery(platform) {
   const errors = loadModule("services/platformError.ts");
   const receipts = loadModule("services/saveReceipt.ts", { "./platformError": errors });
   return loadModule("services/delivery.ts", { "../platform": platform, "./saveReceipt": receipts });
+}
+export function loadDiagnostics() {
+  return loadModule("services/diagnostics.ts", { "./reportPolicy.mjs": reportPolicy });
 }
