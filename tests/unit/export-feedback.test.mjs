@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { loadModule } from "../source-probes.mjs";
-const { exportStage, exportRecovery, copyableJobDetails, mediaRecovery } = loadModule("services/exportFeedback.ts");
+const { exportStage, exportRecovery, copyableJobDetails, mediaRecovery } = loadModule("services/exportFeedback.ts", { "./diagnostics": loadModule("services/diagnostics.ts") });
 test("export stages describe actual processing and recovery does not permit unsafe retry", () => {
   assert.equal(exportStage({ phase: "rendering" }), "Rendering video and mixing audio");
   assert.equal(exportStage({ phase: "saving" }), "Preparing download");
@@ -11,7 +11,7 @@ test("export stages describe actual processing and recovery does not permit unsa
   for (const category of ["denied", "cancelled", "transport", "unknown", "unsupported", "rejected", "size-limit"]) assert.ok(mediaRecovery(category).length > 30);
 });
 test("copyable job details omit raw messages, names and event payloads", () => {
-  const report = copyableJobDetails({ jobId: "job", buildId: "build", phase: "failed", progress: 95, cleanupComplete: true,
+  const report = copyableJobDetails({ jobId: "00000000-0000-4000-8000-000000000000", buildId: "build", phase: "failed", progress: 95, cleanupComplete: true,
     failure: { category: "unknown", assetId: "private-person" }, logs: ["secret"], error: "/home/user/private.mp4",
     events: [{ type: "failed", elapsedMs: 12, detail: { base64: "private media", name: "secret" } }] });
   assert.doesNotMatch(report, /secret|private|base64|home/);

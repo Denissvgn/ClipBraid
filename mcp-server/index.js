@@ -15,7 +15,9 @@ import {
 import {
   parseJournal,
   exportStatus,
+  reportStatus,
   LOG_NAMES,
+  LEGACY_LOG_NAMES,
   LOG_ALLOWLIST,
 } from "./lib.js";
 import { TOOLS, validateArguments } from "./tools.js";
@@ -123,7 +125,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     file &&
     LOG_ALLOWLIST.has(file)
   ) {
-    const { text: logText, mtimeMs, truncated } = await readBounded(file, MAX_LOG_BYTES, true);
+    let result = await readBounded(path.resolve(ROOT, file), MAX_LOG_BYTES, args.name !== "latest"), legacyFallback = false;
+    if (!result.text && LEGACY_LOG_NAMES[args.name]) {
+      result = await readBounded(LEGACY_LOG_NAMES[args.name], MAX_LOG_BYTES, true); legacyFallback = true;
+    }
+    const { text: logText, mtimeMs, truncated } = result;
     if (name === "export_logs") {
       return text(logText ? logText.trim().split("\n").slice(-(args.lines ?? 20)).join("\n") : "Log is empty or missing.");
     }
@@ -132,7 +138,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       JSON.stringify(
         {
           log: args.name,
-          ...exportStatus(logText, { mtimeMs }),
+          ...(args.name === "latest" ? reportStatus(logText ? JSON.parse(logText) : null) : exportStatus(logText, { mtimeMs })),
+          legacyFallback,
           truncated,
           lastProgress: threadLines.slice(-4),
           pageErrors: /PAGEERRORS:\s*(\[.*\])/.exec(logText)?.[1] ?? "n/a",

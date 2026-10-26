@@ -21,7 +21,7 @@ export type ExportPhaseResult =
   | { phase: "muxing"; videoBytes: number }
   | { phase: "saving"; accepted: true };
 export interface ExportResult { videoBytes: number; delivery: "download-started" | "host-accepted" }
-export type ExportEventType = "started" | "rendered" | "muxed" | "verified" | "delivery-started" | "download-started" | "host-accepted" | "failed" | "cancelled" | "unknown";
+export type ExportEventType = "started" | "heartbeat" | "rendered" | "muxed" | "verified" | "delivery-started" | "download-started" | "host-accepted" | "failed" | "cancelled" | "unknown";
 export interface ExportEvent { schemaVersion: 1; jobId: string; buildId: string; type: ExportEventType; at: string; elapsedMs: number; detail: Record<string, unknown> }
 export interface ExportState {
   jobId: string | null;
@@ -38,6 +38,12 @@ export interface ExportState {
   buildId: string;
   events: ExportEvent[];
   diagnostics: Record<string, unknown>[];
+  startedAt: string | null;
+  updatedAt: string | null;
+  endedAt: string | null;
+  phaseTimingsMs: Partial<Record<ExportPhase, number>>;
+  input: { fingerprint: string | null; clips: number; audioTracks: number; duration: number;
+    quality: ExportQuality; aspectRatio: ExportSnapshot["aspectRatio"]; fitMode: ExportSnapshot["fitMode"] } | null;
 }
 export interface ExportContext {
   jobId: string;
@@ -113,12 +119,14 @@ export interface ExportDeadlines {
 /** One job owns a frozen edit/settings snapshot, original leases and all events. */
 export class ExportJobs {
   private state: ExportState = Object.freeze({ jobId: null, phase: "idle", active: false,
-    progress: 0, logs: [], error: null, failure: null, result: null, phaseResults: [], cancellable: false, cleanupComplete: true, buildId: "unqualified", events: [], diagnostics: [] });
+    progress: 0, logs: [], error: null, failure: null, result: null, phaseResults: [], cancellable: false, cleanupComplete: true, buildId: "unqualified", events: [], diagnostics: [],
+    startedAt: null, updatedAt: null, endedAt: null, phaseTimingsMs: {}, input: null });
   private listeners = new Set<() => void>();
   private running: Promise<void> | null = null;
   private resources: ExportResources | null = null;
+  private publishedAt = performance.now();
   constructor(
-    private store: Pick<MediaSourceStore, "acquireAll" | "bytesFor">,
+    private store: Pick<MediaSourceStore, "acquireAll" | "bytesFor"> & Partial<Pick<MediaSourceStore, "get">>,
     private run: ExportRunner,
     private deadlines: ExportDeadlines = {},
     private buildId = "unqualified",
@@ -141,7 +149,11 @@ export class ExportJobs {
     if (!this.state.active) this.publish({ phase: "idle", error: null, failure: null });
   };
   private publish(update: Partial<ExportState>) {
-    this.state = Object.freeze({ ...this.state, ...update });
+    const now = performance.now(), sameJob = !update.jobId || update.jobId === this.state.jobId;
+    const timings = { ...this.state.phaseTimingsMs };
+    if (sameJob && this.state.active) timings[this.state.phase] = (timings[this.state.phase] ?? 0) + now - this.publishedAt;
+    this.publishedAt = now;
+    this.state = Object.freeze({ ...this.state, phaseTimingsMs: timings, ...update, updatedAt: new Date().toISOString() });
     for (const listener of this.listeners) listener();
   }
   start(input: ExportSnapshot): Promise<void> {
@@ -246,14 +258,30 @@ export class ExportJobs {
       }
     } catch (error) { setupError = error; }
     this.publish({ jobId, phase: "preparing", active: true, progress: 0, logs: [],
-      error: null, failure: null, result: null, phaseResults: [], cancellable: true, cleanupComplete: false, buildId: this.buildId, events: [], diagnostics: [] });
+      error: null, failure: null, result: null, phaseResults: [], cancellable: true, cleanupComplete: false, buildId: this.buildId, events: [], diagnostics: [],
+      startedAt: new Date().toISOString(), endedAt: null, phaseTimingsMs: {}, input: {
+        fingerprint: null, clips: snapshot.mediaAssets.length, audioTracks: snapshot.audioTracks.length, duration: snapshot.totalDuration,
+        quality: snapshot.exportQuality, aspectRatio: snapshot.aspectRatio, fitMode: snapshot.fitMode } });
     armStage("preparing");
     context.addLog("EXPORT STARTED");
     context.event("started");
+    const heartbeat = setInterval(() => {
+      if (!this.state.active || this.state.jobId !== jobId) clearInterval(heartbeat);
+      else context.event("heartbeat");
+    }, 5000);
     void (async () => {
       let result: ExportResult | null = null, error: string | null = null;
       try {
         if (setupError) throw setupError;
+        const identity = [...snapshot.mediaAssets, ...snapshot.audioTracks].map(asset => {
+          const { name: _name, id: _id, sourceId, mediaId: _transport, ...edit } = asset;
+          return { checksum: this.store.get?.(sourceId)?.sha256, edit };
+        });
+        if (identity.every(asset => asset.checksum)) {
+          const fingerprint = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify({ identity,
+            aspectRatio: snapshot.aspectRatio, fitMode: snapshot.fitMode, quality: snapshot.exportQuality })))), byte => byte.toString(16).padStart(2, "0")).join("");
+          update({ input: { ...this.state.input!, fingerprint } });
+        }
         result = await this.run(snapshot, context);
         resources.signal.throwIfAborted();
       } catch (cause) {
@@ -264,6 +292,7 @@ export class ExportJobs {
         resources.abort(cause);
         context.addLog(`EXPORT STOPPED: ${error}`);
       } finally {
+        clearInterval(heartbeat);
         clearTimeout(diagnosticTimer);
         update({ diagnostics: [...diagnostics] });
         clearTimeout(abortCleanupTimer);
@@ -289,7 +318,7 @@ export class ExportJobs {
         if (error) context.event(cancelled ? "cancelled" : "failed", { message: error,
           category: (resources.signal.reason as { category?: string })?.category ?? "processing", cleanupComplete });
         this.publish({ active: false, phase: error ? (cancelled && cleanupComplete ? "cancelled" : "failed") : "complete", error, result,
-          progress: error ? this.state.progress : 100, cleanupComplete, cancellable: false });
+          progress: error ? this.state.progress : 100, cleanupComplete, cancellable: false, endedAt: new Date().toISOString() });
         finish();
       }
     })();

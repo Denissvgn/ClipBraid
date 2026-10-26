@@ -45,13 +45,12 @@ import { IntroModal } from "./components/IntroModal";
 import { JournalViewer } from "./components/JournalViewer";
 import { ExportFeedback } from "./components/ExportFeedback";
 import { mediaRecovery } from "./services/exportFeedback";
+import { createJobReport } from "./services/diagnostics";
+import { useJobDiagnostics } from "./components/useJobDiagnostics";
 import {
-  parseJournal,
   logEvent,
   type SystemEventKind,
 } from "./services/journalService";
-// The development journal resolves to an empty module in every build.
-import journalMarkdown from "virtual:development-journal";
 import { Input, BlobSource, ALL_FORMATS } from "mediabunny";
 const base64ToUint8Array = (base64: string): Uint8Array<ArrayBuffer> => {
   try {
@@ -184,7 +183,6 @@ export default function App() {
   const [showSafeZones, setShowSafeZones] = useState(false);
   const [isTheaterMode, setIsTheaterMode] = useState(false);
   const [showJournal, setShowJournal] = useState(false);
-  const journalEntries = useMemo(() => parseJournal(journalMarkdown), []);
   const requestRef = useRef<number | null>(null);
   const startTimeRef = useRef<number>(0);
   const playbackStartTimeRef = useRef<number>(performance.now());
@@ -222,6 +220,7 @@ export default function App() {
   const proxyQueue = proxyQueueRef.current;
   const proxyState = useSyncExternalStore(proxyQueue.subscribe, proxyQueue.getSnapshot);
   const exportState = useSyncExternalStore(exportJobs.subscribe, exportJobs.getSnapshot);
+  const jobDiagnostics = useJobDiagnostics(exportState);
   const isExporting = exportState.active;
   const exportFailed = exportState.phase === "failed";
   useEffect(() => {
@@ -935,10 +934,13 @@ export default function App() {
   return (
     <div className={`editor-app ${isTheaterMode ? "theater-mode" : ""}`} data-build-id={BUILD_ID}>
       <output hidden id="export-evidence" aria-hidden="true">{JSON.stringify(exportState)}</output>
+      <output hidden id="export-diagnostic-report" aria-hidden="true">{JSON.stringify(createJobReport(exportState))}</output>
       {showIntro && <IntroModal onDismiss={() => setShowIntro(false)} />}
       {showJournal && (
         <JournalViewer
-          entries={journalEntries}
+          reports={jobDiagnostics.reports} warning={jobDiagnostics.warning} onClear={jobDiagnostics.clear}
+          currentJobId={exportState.active ? exportState.jobId : null}
+          currentReport={createJobReport(exportState)}
           onClose={() => setShowJournal(false)}
         />
       )}
@@ -1029,6 +1031,7 @@ export default function App() {
         <span>Media action {mediaNotice.category}: {mediaNotice.message} {mediaRecovery(mediaNotice.category)}</span>
         <button className="button secondary" onClick={() => setMediaNotice(null)}>Dismiss media message</button>
       </div>}
+      {jobDiagnostics.warning && <p className="source-notice" role="alert">{jobDiagnostics.warning}</p>}
       {exportState.result && <p className="source-notice" role="status" data-delivery-outcome={exportState.result.delivery}>
         {exportState.result.delivery === "download-started" ? "Last export: Download started. Video/audio structure was checked; final disk storage is controlled by your browser." : "Last export: Host accepted the checked video. Host acceptance does not confirm final device storage."}
       </p>}

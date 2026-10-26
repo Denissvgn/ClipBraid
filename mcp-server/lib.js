@@ -37,6 +37,15 @@ export function insertEntry(markdown, title, body, now = new Date(), timeZone = 
 }
 
 export const LOG_NAMES = {
+  latest: "reports/diagnostics/latest.json",
+  verify: "reports/diagnostics/verify.log",
+  draft: "reports/diagnostics/draft.log",
+  draft2: "reports/diagnostics/draft2.log",
+  mon: "reports/diagnostics/mon.log",
+  out: "reports/diagnostics/out.log",
+};
+// Transitional aliases for existing developer configurations; never the primary location.
+export const LEGACY_LOG_NAMES = {
   verify: "/tmp/e2e_verify.txt",
   draft: "/tmp/e2e_draft.txt",
   draft2: "/tmp/e2e_draft2.txt",
@@ -44,7 +53,7 @@ export const LOG_NAMES = {
   out: "/tmp/e2e_out.txt",
 };
 
-export const LOG_ALLOWLIST = new Set(Object.values(LOG_NAMES));
+export const LOG_ALLOWLIST = new Set([...Object.values(LOG_NAMES), ...Object.values(LEGACY_LOG_NAMES)]);
 
 // Negative terminal outcomes outrank late acknowledgements; a heartbeat is required for RUNNING.
 export function exportStatus(logText, { mtimeMs = null, nowMs = Date.now(), maxIdleMs = 45_000, aborted = false } = {}) {
@@ -78,3 +87,15 @@ export function exportStatus(logText, { mtimeMs = null, nowMs = Date.now(), maxI
     reason: verdict === "UNKNOWN" ? (stale ? "No recent heartbeat; the run may have stopped." : "No trustworthy terminal delivery outcome.") : null };
 }
 export function exportVerdict(logText, options = {}) { return exportStatus(logText, options).verdict; }
+
+export function reportStatus(value, nowMs = Date.now()) {
+  if (!value || value.schemaVersion !== 1 || !/^[a-f0-9-]{36}$/.test(value.jobId ?? "") ||
+    !["running", "failed", "cancelled", "unknown", "aborted", "download-started", "host-accepted"].includes(value.outcome))
+    return { verdict: "UNKNOWN", reason: "Invalid or missing job summary.", source: "job-report" };
+  const heartbeat = Date.parse(value.updatedAt), stale = !Number.isFinite(heartbeat) || nowMs - heartbeat > 45_000 || heartbeat > nowMs + 5000;
+  return { verdict: value.phase === "failed" ? "FAILED" : value.phase === "cancelled" ? "CANCELLED"
+      : value.outcome === "running" ? (stale ? "UNKNOWN" : "RUNNING") : value.outcome.toUpperCase().replaceAll("-", "_"),
+    jobId: value.jobId, buildId: typeof value.buildId === "string" && /^[a-f0-9]{64}:(test|production|development)$/.test(value.buildId) ? value.buildId : null,
+    heartbeatAt: Number.isFinite(heartbeat) ? new Date(heartbeat).toISOString() : null, stale, source: "job-report",
+    reason: value.outcome === "running" && stale ? "No recent heartbeat; the run may have stopped." : null };
+}

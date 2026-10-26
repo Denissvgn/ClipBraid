@@ -1,12 +1,8 @@
 /**
- * Journal service — two surfaces, one module:
- *
- * 1. SYSTEM EVENTS (live): append-only ring buffer of what THIS app instance
- *    does — imports, probes, normalizations, exports, saves, errors. The
- *    viewer subscribes and live-updates. Survives across exports within the
- *    session; cleared on reload (history belongs in the dev log).
- * 2. DEV LOG (development only): the local reports/development/JOURNAL.md — the cross-session
- *    handoff diary. Read-only at runtime; agents append via MCP.
+ * Device-local session events. The bounded ring clears on reload; durable,
+ * redacted export summaries live in diagnostics.ts. The developer journal is
+ * separate and accessible through MCP, never imported into the product UI.
+ * Historical parsing helpers remain for developer consumers.
  */
 
 export type SystemEventKind =

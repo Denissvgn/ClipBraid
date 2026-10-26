@@ -11,5 +11,7 @@ test("render diagnostics retain requested source times, waits and native resourc
   expect(state.diagnostics.some(point=>point.clipId==="traced"&&Number.isFinite(point.sourceTime)&&point.operation==="decode-request")).toBe(true);
   expect(Math.max(...state.diagnostics.map(point=>point.decodersCreated??0))).toBeGreaterThan(0);
   expect(state.diagnostics.every(point=>Number.isFinite(point.ownedResources)&&Number.isFinite(point.sourceLeases))).toBe(true);
+  const report=await page.locator("#export-diagnostic-report").evaluate(el=>JSON.parse(el.textContent));
+  expect(report.resources.some(point=>Number.isFinite(point.decodersActive)&&Number.isFinite(point.encodersActive))).toBe(true);
   await info.attach("render-diagnostics",{body:JSON.stringify(state.diagnostics),contentType:"application/json"});
 });

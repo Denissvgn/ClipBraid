@@ -1,4 +1,5 @@
 import type { ExportState } from "./exportJob";
+import { createJobReport } from "./diagnostics";
 
 export function exportStage(state: Pick<ExportState, "phase" | "cancellable">): string {
   return ({ idle: "Ready to export", preparing: "Preparing media", rendering: "Rendering video and mixing audio",
@@ -34,7 +35,5 @@ export function mediaRecovery(category: string): string {
 
 /** Copy only machine evidence; raw errors, filenames and media remain in opt-in local details. */
 export function copyableJobDetails(state: ExportState): string {
-  return JSON.stringify({ schemaVersion: 1, jobId: state.jobId, buildId: state.buildId, phase: state.phase,
-    progress: state.progress, cleanupComplete: state.cleanupComplete, category: state.failure?.category,
-    events: state.events.map(({ type, elapsedMs }) => ({ type, elapsedMs })) }, null, 2);
+  return JSON.stringify(createJobReport(state), null, 2);
 }

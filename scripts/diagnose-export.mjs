@@ -1,9 +1,16 @@
 import { chromium } from "@playwright/test";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import os from "node:os";
 const [input, folder, quality = "draft", plan = "auto", timeout = "420000"] = process.argv.slice(2);
+async function writeSummary(page) {
+  const summary = await page.locator("#export-diagnostic-report").evaluate(element => JSON.parse(element.textContent));
+  await mkdir("reports/diagnostics", { recursive: true });
+  const temp = `reports/diagnostics/latest.${process.pid}.tmp`;
+  await writeFile(temp, JSON.stringify(summary, null, 2));
+  await rename(temp,"reports/diagnostics/latest.json");
+}
 if (!input || !folder) throw new Error("Usage: diagnose-export.mjs input.json ignored-output-dir [quality] [auto|single] [timeout-ms]");
 await mkdir(folder, { recursive: true });
 const browser = await chromium.launch({ channel: "chromium", headless: true, args: ["--autoplay-policy=no-user-gesture-required"] });
@@ -29,6 +36,7 @@ try {
   while (Date.now() - started < Number(timeout)) {
     await page.waitForTimeout(1000);
     state = await page.locator("#export-evidence").evaluate(element => JSON.parse(element.textContent));
+    await writeSummary(page);
     trace.push({ wallMs: Date.now() - started, ...state });
     await writeFile(`${folder}/trace.json`, JSON.stringify(trace));
     if (!state.active) break;
@@ -36,6 +44,8 @@ try {
   if (state?.active) {
     await page.getByRole("button", { name: "Cancel export", exact: true }).click();
     await page.waitForTimeout(1500);
+    state = await page.locator("#export-evidence").evaluate(element => JSON.parse(element.textContent));
+    await writeSummary(page);
   }
   let received = null;
   if (download) {

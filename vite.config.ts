@@ -1,30 +1,25 @@
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
-import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { inspectArtifacts, assertProductModules } from './scripts/artifact-policy.mjs';
 import { sourceIdentity } from './scripts/source-identity.mjs';
 
 export default defineConfig(({ command, mode }) => {
-  const buildId = `${sourceIdentity().sha256}:${command === 'build' ? 'production' : mode}`;
+  const identity = sourceIdentity();
+  const buildId = `${identity.sha256}:${command === 'build' ? 'production' : mode}`;
   const development = command === 'serve' && mode === 'development';
   const automation = command === 'serve' && mode === 'test';
-  const journalId = '\0virtual:development-journal';
   let outputDir = '';
   let projectRoot = '';
   const isolation: Plugin = {
     name: 'product-artifact-isolation',
     enforce: 'post',
     configResolved(config) { outputDir = resolve(config.root, config.build.outDir); projectRoot = config.root; },
-    resolveId(id) { if (id === 'virtual:development-journal') return journalId; },
-    async load(id) {
-      if (id !== journalId) return;
-      const contents = development ? await readFile('reports/development/JOURNAL.md', 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error; }) : '';
-      return `export default ${JSON.stringify(contents)};`;
-    },
     configureServer(server) {
       // Opt-in, local development only. Never copy the private reference into public/.
       server.middlewares.use('/__fixtures__/reference.json', (_req, res) => {
@@ -46,7 +41,13 @@ export default defineConfig(({ command, mode }) => {
       });
       const files = await inspectArtifacts(outputDir, expected);
       await mkdir('reports', { recursive: true });
-      await writeFile('reports/build-artifacts.json', JSON.stringify({ outputDir, files }, null, 2) + '\n');
+      let commit: string | null = null, dirty: boolean | null = null;
+      try {
+        commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+        dirty = !!execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      } catch { /* Source archives have no Git metadata; the source hash remains authoritative. */ }
+      await writeFile('reports/build-artifacts.json', JSON.stringify({ schemaVersion: 1, buildId,
+        source: { commit, dirty, inputsSha256: identity.sha256 }, outputDir, files }, null, 2) + '\n');
     },
   };
   return {

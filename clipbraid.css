@@ -874,6 +874,12 @@ input[type="range"]::-moz-range-thumb {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
 }
+.diagnostics-list textarea {
+  display: block;
+  width: 100%;
+  margin-block: var(--space-md);
+  font: 400 var(--text-xs)/1.5 var(--font-mono);
+}
 .export-log {
   max-height: 160px;
   overflow: auto;

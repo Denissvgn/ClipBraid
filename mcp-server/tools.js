@@ -36,7 +36,7 @@ export const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        name: { type: 'string', enum: ['verify', 'draft', 'draft2', 'mon', 'out'], description: 'Allow-listed log name' },
+        name: { type: 'string', enum: ['latest', 'verify', 'draft', 'draft2', 'mon', 'out'], description: 'latest is the bounded current job summary; other names are developer log aliases' },
         lines: { type: 'integer', minimum: 1, maximum: 100, description: 'Tail line count (default 20)' },
       },
       required: ['name'],
@@ -49,7 +49,7 @@ export const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        name: { type: 'string', enum: ['verify', 'draft', 'draft2', 'mon', 'out'], description: 'Allow-listed log name' },
+        name: { type: 'string', enum: ['latest', 'verify', 'draft', 'draft2', 'mon', 'out'], description: 'Allow-listed job summary or log alias' },
       },
       required: ['name'],
       additionalProperties: false,
