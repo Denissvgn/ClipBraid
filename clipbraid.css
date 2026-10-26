@@ -433,6 +433,16 @@ button[aria-busy="true"] {
   line-height: 1.55;
   margin: 0;
 }
+.profile-details summary {
+  min-height: 44px;
+  padding-block: var(--space-md);
+  color: var(--color-accent);
+  cursor: pointer;
+  font-size: var(--text-sm);
+}
+.profile-details p + p {
+  margin-top: var(--space-sm);
+}
 .switch-row {
   display: flex;
   align-items: center;

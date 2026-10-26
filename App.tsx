@@ -44,7 +44,7 @@ import { AudioEngine } from "./components/AudioEngine";
 import { IntroModal } from "./components/IntroModal";
 import { JournalViewer } from "./components/JournalViewer";
 import { ExportFeedback } from "./components/ExportFeedback";
-import { mediaRecovery } from "./services/exportFeedback";
+import { mediaRecovery, mediaNoticeTitle } from "./services/exportFeedback";
 import { createJobReport } from "./services/diagnostics";
 import { useJobDiagnostics } from "./components/useJobDiagnostics";
 import {
@@ -256,8 +256,7 @@ export default function App() {
     const attempt = ++bootAttemptRef.current;
     setStatus("LOADING MEDIA TOOLS...");
     return ffmpegService.load(message => {
-      if (attempt === bootAttemptRef.current && !exportJobs.getSnapshot().active)
-        setStatus(message.slice(0, 30).toUpperCase());
+      if (attempt === bootAttemptRef.current) logEvent("info", message);
     }).then(() => {
       if (attempt === bootAttemptRef.current && !exportJobs.getSnapshot().active) setStatus("READY");
     }).catch(error => {
@@ -666,6 +665,7 @@ export default function App() {
   ]);
   const handleSaveProject = async () => {
     if (saveInFlightRef.current) return;
+    setMediaNotice(null);
     saveInFlightRef.current = true;
     setStatus("SAVING PROJECT...");
     // One consistent snapshot of a single render's state. Every source is
@@ -721,6 +721,7 @@ export default function App() {
     }
   };
   const loadProjectState = async (data: ProjectSnapshot, sources: { sourceId: string; bytes: Blob; mimeType: string }[]): Promise<boolean> => {
+    setMediaNotice(null);
     setStatus("LOADING PROJECT...");
     const tx = storeRef.current!.beginTransaction();
     try {
@@ -829,6 +830,7 @@ export default function App() {
     if (!selectedAssetId || isExporting) return;
     const target = cleanupRef.current.mediaAssets.find(asset => asset.id === selectedAssetId);
     if (!target || target.type !== "video") return;
+    setMediaNotice(null);
     const tx = storeRef.current!.beginTransaction();
     try {
       const selected = await Flow.media.select({ filter: "video" });
@@ -930,6 +932,8 @@ export default function App() {
   const displayStatus =
     status === "READY"
       ? "Ready"
+      : status === "FATAL ERROR" ? "Media tools unavailable"
+      : status === "BOOTING..." ? "Starting editor…"
       : status.charAt(0) + status.slice(1).toLowerCase();
   return (
     <div className={`editor-app ${isTheaterMode ? "theater-mode" : ""}`} data-build-id={BUILD_ID}>
@@ -1027,8 +1031,9 @@ export default function App() {
           </button>
         </div>
       </header>
-      {mediaNotice && <div className="source-notice recovery-notice" role={mediaNotice.category === "cancelled" ? "status" : "alert"}>
-        <span>Media action {mediaNotice.category}: {mediaNotice.message} {mediaRecovery(mediaNotice.category)}</span>
+      {mediaNotice && <div className="source-notice recovery-notice" data-media-category={mediaNotice.category} role={mediaNotice.category === "cancelled" ? "status" : "alert"}>
+        <span><strong>{mediaNoticeTitle(mediaNotice.category)}</strong> {["project", "relink"].includes(mediaNotice.category) ? mediaNotice.message : ""} {mediaRecovery(mediaNotice.category)}</span>
+        <details><summary>Technical details</summary><p>{mediaNotice.message}</p></details>
         <button className="button secondary" onClick={() => setMediaNotice(null)}>Dismiss media message</button>
       </div>}
       {jobDiagnostics.warning && <p className="source-notice" role="alert">{jobDiagnostics.warning}</p>}
@@ -1473,7 +1478,7 @@ export default function App() {
                 <section className="inspector-section">
                   <h3>Export quality</h3>
                   <label><input type="checkbox" checked={singleEncoder} onChange={event => setSingleEncoder(event.target.checked)} />Compatibility render (one encoder)</label>
-                  <p className="helper-text">Draft: 480p. Standard/High: 720p. Export uses up to 30 fps, square pixels and SDR color; framing and frame-rate conversion may change the source appearance.</p>
+                  <p className="helper-text">Draft: smaller 480p video. Standard: 720p. High: 720p with a higher bitrate and larger estimated file.</p>
                   <div className="segmented">
                     {(["draft", "standard", "high"] as ExportQuality[]).map(
                       (quality) => (
@@ -1489,23 +1494,30 @@ export default function App() {
                   </div>
                   <p className="helper-text">
                     ~{exportEstimate.estimatedMiB.toFixed(1)} MiB estimated ·
-                    actual size varies · ~{exportEstimate.base64MiB.toFixed(1)} MiB base64 transport
+                    actual size varies
                   </p>
-                  <p className="helper-text">{Math.round(exportEstimate.videoBitrate / 1000)} kb/s video + {Math.round(exportEstimate.audioBitrate / 1000)} kb/s audio. Estimates are advisory. Video handoff is capped at 96 MiB; host limits may be lower.</p>
+                  <p className="helper-text">Video handoff is capped at 96 MiB; host limits may be lower.</p>
+                  <details className="profile-details"><summary>Export profile details</summary>
+                    <p className="helper-text">Export uses up to 30 fps, square pixels and SDR color. Framing, resizing and frame-rate conversion may change the source appearance.</p>
+                    <p className="helper-text">{Math.round(exportEstimate.videoBitrate / 1000)} kb/s video + {Math.round(exportEstimate.audioBitrate / 1000)} kb/s audio. Estimated base64 handoff: ~{exportEstimate.base64MiB.toFixed(1)} MiB.</p>
+                  </details>
                   {exportEstimate.estimatedBytes > 96 * 1048576 && <p className="helper-text">This estimate exceeds the delivery cap. Consider a lower profile or shorter timeline; actual bytes are checked before delivery.</p>}
                 </section>
                 {videos.length > 0 && (
                   <section className="inspector-section" aria-label="Preview optimization">
                     <h3>Preview performance</h3>
                     <p className="helper-text" role="status">
-                      {proxyState.filter(job => job.status === "ready").length} optimized preview(s).
+                      {proxyState.filter(job => job.status === "ready").length} optimized previews.
                       {proxyState.some(job => job.status === "queued" || job.status === "running") ? " Optimizing while idle…" : ""}
                       {" "}Project files, original sound and exports use your originals.
                     </p>
                     <button className="button secondary" onClick={() => proxyQueue.request(mediaAssets)} disabled={isExporting}>Optimize previews</button>
                     {proxyState.some(job => job.status === "queued" || job.status === "running") &&
                       <button className="button secondary" onClick={proxyQueue.cancel}>Cancel optimization</button>}
-                    {proxyState.filter(job => job.status === "failed").map(job => <p key={job.sourceId} className="helper-text">{job.name}: {job.error}</p>)}
+                    {proxyState.filter(job => job.status === "failed").map(job => <div key={job.sourceId}>
+                      <p className="helper-text">Could not optimize “{job.name}”. Original media is retained. Continue editing or try optimization again.</p>
+                      <details><summary>Optimization details</summary><p className="helper-text">{job.error}</p></details>
+                    </div>)}
                   </section>
                 )}
                 <section className="inspector-section" aria-label="Local draft storage">

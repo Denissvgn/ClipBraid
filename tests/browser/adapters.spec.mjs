@@ -8,7 +8,8 @@ test("picker cancellation removes temporary controls and invalid host media pres
   expect(await saveDraft(page)).toEqual(before);
   await page.evaluate(()=>{window.Flow={media:{select:async()=>({mimeType:"application/octet-stream",type:"image",name:"bad.bin",base64:"AQ=="})}}});
   await page.getByRole("button",{name:"Add visuals",exact:true}).click();
-  await expect(page.getByText(/Media action unsupported/)).toBeVisible();
+  await expect(page.locator('[data-media-category="unsupported"]')).toContainText("Action unavailable here.");
+  await expect(page.locator('[data-media-category="unsupported"] details p')).not.toBeVisible();
   await page.evaluate(()=>{delete window.Flow});expect(await saveDraft(page)).toEqual(before);
 });
 async function syntheticMicrophone(page){
@@ -31,7 +32,7 @@ test("native recorder stop uses actual media duration and cancel/denial/error st
   expect(await page.evaluate(()=>window.capturedTracks.every(track=>track.readyState==="ended"))).toBe(true);
   await page.getByRole("button",{name:"Start recording",exact:true}).click();await page.waitForTimeout(100);await page.getByRole("button",{name:"Cancel recording",exact:true}).click();
   await expect(page.locator('[data-editor-status="RECORD CANCELLED"]')).toBeVisible();await expect(page.locator('[data-audio-track]')).toHaveCount(1);
-  await page.evaluate(()=>{window.captureMode="denied"});await page.getByRole("button",{name:"Start recording",exact:true}).click();await expect(page.getByText(/Media action denied/)).toBeVisible();
+  await page.evaluate(()=>{window.captureMode="denied"});await page.getByRole("button",{name:"Start recording",exact:true}).click();await expect(page.locator('[data-media-category="denied"]')).toContainText("Access needed.");
   await page.evaluate(()=>{window.captureMode="normal";const Native=MediaRecorder;window.MediaRecorder=class extends Native{start(...args){super.start(...args);setTimeout(()=>this.dispatchEvent(new Event("error")),50)}}});
   await page.getByRole("button",{name:"Start recording",exact:true}).click();await expect(page.locator('[data-editor-status="RECORD ERROR"]')).toBeVisible();
   expect(await page.evaluate(()=>window.capturedTracks.every(track=>track.readyState==="ended"))).toBe(true);

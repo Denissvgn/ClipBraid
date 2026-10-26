@@ -49,11 +49,11 @@ export const MediaPreview: React.FC<MediaPreviewProps> = ({
             <Icon name="video" size={34} />
             <Icon name="music" size={22} />
           </div>
-          <h2>A place for your next video</h2>
+          <h2>Add visuals to start your video</h2>
           <p>
             Add video clips or photos to begin.
             <br />
-            Your audio gets its own space below.
+            Add audio for music or narration on separate tracks.
           </p>
         </div>
       ) : (

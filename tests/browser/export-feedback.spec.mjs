@@ -40,4 +40,6 @@ test("an invalid project offers recovery guidance while retaining the current ed
   await expect(page.locator(".source-notice[role='alert']")).toContainText("Your current project is still available");
   await expect(page.locator(".source-notice[role='alert']")).toContainText("recover an earlier local revision");
   await expect(page.getByRole("button", {name:"Export video",exact:true})).toBeEnabled();
+  await loadDraft(page, draft([await asset("landscape-red.png")]));
+  await expect(page.locator('[data-media-category="project"]')).toHaveCount(0);
 });

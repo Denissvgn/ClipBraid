@@ -45,6 +45,10 @@ export const IntroModal: React.FC<{ onDismiss: () => void }> = ({
         </div>
       </div>
       <p className="intro-note">
+        Save project keeps an editable JSON file with your media and edits.
+        Export video makes an MP4 to watch or share.
+      </p>
+      <p className="intro-note">
         Experimental editor. Keep your originals and save your project as you
         work.
       </p>

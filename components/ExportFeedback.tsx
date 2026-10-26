@@ -34,7 +34,7 @@ export const ExportFeedback: React.FC<{
         <progress max="100" value={state.progress} aria-label="Video export progress" />
         <button className="button secondary" onClick={onCancel} disabled={!state.cancellable}>Cancel export</button>
         <p>{state.phase === "cancelling" || state.phase === "cleaning" ? "Waiting for media resources to close…"
-          : !state.cancellable ? "Waiting for the save adapter; delivery may have started." : "You can cancel and keep editing."}</p>
+          : !state.cancellable ? "Waiting for your browser or host to confirm the handoff. A download may have started." : "You can cancel and keep editing."}</p>
       </>}
       <details className="technical-details">
         <summary>Technical details</summary>

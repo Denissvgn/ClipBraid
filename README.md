@@ -30,14 +30,19 @@ be retried in the editor.
    playhead on separate, parallel tracks.
 3. Turn **Original video sound** off for your own soundtrack, or select a clip
    to adjust its sound, trim, order and look.
-4. **Save project** keeps an editable JSON draft. **Export video** prepares an MP4.
+4. **Save project** downloads an editable JSON file containing your media and edits.
+   **Export video** makes an MP4 to watch or share. **Open project** loads a JSON
+   project; **Restore local revision** recovers a browser autosave.
 
 Track volumes share the same overlap headroom in preview and export. New project
 files use format version 2; unversioned and version 1 drafts remain readable.
 
 Exports are resized/re-encoded to the chosen 480p/720p profile at up to 30 fps SDR.
 File sizes are advisory bitrate estimates; video handoff is capped at 96 MiB and
-host limits may be lower. Browser delivery reports download initiation.
+host limits may be lower. **Download started** means the browser initiated a
+download; check your downloads for the saved file. **Host accepted** means the
+embedded host acknowledged the handoff. Final device storage belongs to that
+browser or host.
 
 Local autosave offers browser revision recovery. Keep originals and download a
 separate project backup; browser storage can be removed externally. Undo is not
@@ -46,6 +51,11 @@ requires explicit stop/cancel hooks. Unsupported host capabilities are reported.
 
 This is an experimental editor. Physical browser/device/Flow support and broader
 media qualification remain in progress.
+
+Media processing runs in your browser. Embedded-host file selection, recording,
+and save/download actions use that host’s integration. Export summaries stay in
+this browser; copied summaries omit filenames, paths and media. **Details → Export
+history** provides these summaries and a clear-history action.
 
 ## Checks
 
