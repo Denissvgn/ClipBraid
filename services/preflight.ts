@@ -13,10 +13,10 @@ export async function preflightAssets(snapshot: ExportSnapshot, context: ExportC
         if (data.jobId !== context.jobId) return;
         if (data.type === "begin") {
           clearTimeout(timer); context.addLog(`Checking media: ${data.name}`);
-          timer = setTimeout(() => context.resources.abort(new Error(`Media check timed out: ${data.name}`)), 15_000);
+          timer = setTimeout(() => context.resources.abort(Object.assign(new Error(`Media check timed out: ${data.name}`), { category: "asset", assetId: data.id })), 15_000);
         }
         if (data.type === "asset") { clearTimeout(timer); context.addLog(`Media checked: ${data.name}`); }
-        if (data.type === "error") reject(new Error(data.error));
+        if (data.type === "error") reject(Object.assign(new Error(data.error), { category: "asset", assetId: data.assetId }));
         if (data.type === "result") resolve(data.inventories);
       };
       worker.onerror = event => { event.preventDefault(); reject(new Error(event.message || "Media check worker failed")); };

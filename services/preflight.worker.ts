@@ -11,7 +11,7 @@ scope.onmessage = async ({ data }: MessageEvent<{ jobId: string; snapshot: Expor
       inventories.push(await probeAsset(asset, blob));
       scope.postMessage({ jobId: data.jobId, type: "asset", id: asset.id, name: asset.name });
     } catch (error) {
-      scope.postMessage({ jobId: data.jobId, type: "error", error: `Cannot use ${asset.name} (${asset.id}): ${String(error)}` }); return;
+      scope.postMessage({ jobId: data.jobId, type: "error", assetId: asset.id, error: `Cannot use ${asset.name} (${asset.id}): ${String(error)}` }); return;
     }
   }
   scope.postMessage({ jobId: data.jobId, type: "result", inventories });

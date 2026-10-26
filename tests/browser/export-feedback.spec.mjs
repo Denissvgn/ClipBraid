@@ -1,0 +1,43 @@
+import { test, expect } from "./harness.mjs";
+import { asset, draft } from "./fixtures.mjs";
+import { openEditor, loadDraft } from "./helpers.mjs";
+test("asset failure offers inspection, hides technical chatter and has copyable job identity", async ({page}, info) => {
+  await openEditor(page);
+  await loadDraft(page, draft([await asset("corrupt.mp4", { id: "broken", name: "Broken holiday clip" })]));
+  await page.getByRole("button", { name: "Export video", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Couldn’t export this video" })).toBeVisible();
+  await expect(page.locator(".export-message")).toContainText("Broken holiday clip");
+  await expect(page.getByRole("button", { name: "Inspect clip" })).toBeVisible();
+  const inspect = await page.getByRole("button", { name: "Inspect clip" }).boundingBox();
+  expect(inspect.y + inspect.height).toBeLessThan(page.viewportSize().height);
+  await expect(page.locator(".export-log")).not.toBeVisible();
+  await page.screenshot({path:info.outputPath("asset-recovery.png")});
+  await page.getByText("Technical details", {exact:true}).click();
+  const report = JSON.parse(await page.getByRole("textbox", { name: "Copyable job diagnostics" }).inputValue());
+  expect(report.jobId).toBeTruthy(); expect(report.buildId).toMatch(/^[a-f0-9]{64}:test$/);
+  expect(JSON.stringify(report)).not.toContain("holiday");
+  await page.getByRole("button", { name: "Inspect clip" }).click();
+  await expect(page.getByRole("button", { name: "Close clip settings" })).toBeFocused();
+});
+test("an unacknowledged save warns about duplicates and retry produces a separate job", async ({page}, info) => {
+  await page.addInitScript(() => { window.acceptSave = false; window.Flow = { save: async () => window.acceptSave ? true : undefined }; });
+  await openEditor(page); await loadDraft(page, draft([await asset("landscape-red.png")]));
+  await page.getByRole("button", {name:"draft",exact:true}).click();
+  await page.getByRole("button", {name:"Export video",exact:true}).click();
+  await expect(page.locator(".export-message")).toContainText("Check your downloads or host files");
+  const retry = await page.getByRole("button", { name: "Retry export", exact:true }).boundingBox();
+  expect(retry.y + retry.height).toBeLessThan(page.viewportSize().height);
+  const old = await page.locator("#export-evidence").evaluate(el => JSON.parse(el.textContent).jobId);
+  await page.screenshot({path:info.outputPath("unknown-delivery.png")});
+  await page.evaluate(() => { window.acceptSave = true; });
+  await page.getByRole("button", {name:"Retry export",exact:true}).click();
+  await expect(page.locator('[data-delivery-outcome="host-accepted"]')).toBeVisible();
+  expect(await page.locator("#export-evidence").evaluate(el => JSON.parse(el.textContent).jobId)).not.toBe(old);
+});
+test("an invalid project offers recovery guidance while retaining the current edit", async ({page}) => {
+  await openEditor(page); await loadDraft(page, draft([await asset("landscape-red.png")]));
+  await page.locator('input[accept=".json"]').setInputFiles({name:"invalid.json",mimeType:"application/json",buffer:Buffer.from("{invalid")});
+  await expect(page.locator(".source-notice[role='alert']")).toContainText("Your current project is still available");
+  await expect(page.locator(".source-notice[role='alert']")).toContainText("recover an earlier local revision");
+  await expect(page.getByRole("button", {name:"Export video",exact:true})).toBeEnabled();
+});

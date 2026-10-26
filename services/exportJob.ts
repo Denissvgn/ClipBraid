@@ -30,6 +30,7 @@ export interface ExportState {
   progress: number;
   logs: string[];
   error: string | null;
+  failure: { category: string; assetId?: string; deliveryMayHaveStarted?: boolean } | null;
   result: ExportResult | null;
   phaseResults: ExportPhaseResult[];
   cancellable: boolean;
@@ -112,7 +113,7 @@ export interface ExportDeadlines {
 /** One job owns a frozen edit/settings snapshot, original leases and all events. */
 export class ExportJobs {
   private state: ExportState = Object.freeze({ jobId: null, phase: "idle", active: false,
-    progress: 0, logs: [], error: null, result: null, phaseResults: [], cancellable: false, cleanupComplete: true, buildId: "unqualified", events: [], diagnostics: [] });
+    progress: 0, logs: [], error: null, failure: null, result: null, phaseResults: [], cancellable: false, cleanupComplete: true, buildId: "unqualified", events: [], diagnostics: [] });
   private listeners = new Set<() => void>();
   private running: Promise<void> | null = null;
   private resources: ExportResources | null = null;
@@ -137,7 +138,7 @@ export class ExportJobs {
     return () => { this.listeners.delete(listener); };
   };
   dismissFailure = () => {
-    if (!this.state.active) this.publish({ phase: "idle", error: null });
+    if (!this.state.active) this.publish({ phase: "idle", error: null, failure: null });
   };
   private publish(update: Partial<ExportState>) {
     this.state = Object.freeze({ ...this.state, ...update });
@@ -168,6 +169,7 @@ export class ExportJobs {
       abortCleanupTimer = setTimeout(() => {
         if (this.state.jobId === jobId && this.state.active) this.publish({
           active: false, phase: "failed", cancellable: false, cleanupComplete: false,
+          failure: { category: "cleanup" },
           error: "Media cleanup has not finished. Save your project and reload before another export.",
         });
       }, this.deadlines.cleanupMs ?? 5000);
@@ -244,7 +246,7 @@ export class ExportJobs {
       }
     } catch (error) { setupError = error; }
     this.publish({ jobId, phase: "preparing", active: true, progress: 0, logs: [],
-      error: null, result: null, phaseResults: [], cancellable: true, cleanupComplete: false, buildId: this.buildId, events: [], diagnostics: [] });
+      error: null, failure: null, result: null, phaseResults: [], cancellable: true, cleanupComplete: false, buildId: this.buildId, events: [], diagnostics: [] });
     armStage("preparing");
     context.addLog("EXPORT STARTED");
     context.event("started");
@@ -256,6 +258,9 @@ export class ExportJobs {
         resources.signal.throwIfAborted();
       } catch (cause) {
         error = String(cause);
+        const detail = cause as { category?: string; assetId?: string; deliveryMayHaveStarted?: boolean; name?: string } | null;
+        update({ failure: { category: detail?.category ?? (detail?.name === "AbortError" ? "cancelled" : "processing"),
+          assetId: detail?.assetId, deliveryMayHaveStarted: detail?.deliveryMayHaveStarted } });
         resources.abort(cause);
         context.addLog(`EXPORT STOPPED: ${error}`);
       } finally {

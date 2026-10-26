@@ -43,6 +43,8 @@ import { MediaPreview } from "./components/MediaPreview";
 import { AudioEngine } from "./components/AudioEngine";
 import { IntroModal } from "./components/IntroModal";
 import { JournalViewer } from "./components/JournalViewer";
+import { ExportFeedback } from "./components/ExportFeedback";
+import { mediaRecovery } from "./services/exportFeedback";
 import {
   parseJournal,
   logEvent,
@@ -222,8 +224,6 @@ export default function App() {
   const exportState = useSyncExternalStore(exportJobs.subscribe, exportJobs.getSnapshot);
   const isExporting = exportState.active;
   const exportFailed = exportState.phase === "failed";
-  const exportProgress = exportState.progress;
-  const exportLogs = exportState.logs;
   useEffect(() => {
     if (exportState.phase === "complete") setStatus("READY");
     if (exportState.phase === "cancelled") setStatus("EXPORT CANCELLED");
@@ -785,6 +785,7 @@ export default function App() {
     } catch (err) {
       tx.rollback();
       setStatus("LOAD ERROR");
+      setMediaNotice({ category: "project", message: "Could not open this project. Your current project is still available." });
       sysLog("error", `Project load failed: ${String(err).slice(0, 120)}`);
       return false;
     }
@@ -796,6 +797,7 @@ export default function App() {
         sourceId: source.sourceId, bytes: base64ToBlob(source.base64, source.mimeType), mimeType: source.mimeType,
       })));
     } catch (error) {
+      setMediaNotice({ category: "project", message: "Could not open this project. Your current project is still available." });
       setStatus("LOAD ERROR"); sysLog("error", `Project load failed: ${String(error).slice(0, 120)}`); return false;
     }
   };
@@ -818,6 +820,7 @@ export default function App() {
       await loadProjectText(await file.text());
     } catch (err) {
       setStatus("LOAD ERROR");
+      setMediaNotice({ category: "project", message: "Could not read this project file. Your current project is still available." });
       sysLog("error", `Project load failed: ${String(err).slice(0, 120)}`);
     } finally {
       e.target.value = "";
@@ -850,6 +853,7 @@ export default function App() {
       setStatus("READY"); sysLog("import", "Original video relinked; clip selections were preserved.");
     } catch (error) {
       tx.rollback(); setStatus("RELINK ERROR");
+      setMediaNotice({ category: "relink", message: "Could not relink the original file." });
       sysLog("error", `Could not relink original: ${String(error)}`);
     }
   };
@@ -1022,12 +1026,16 @@ export default function App() {
         </div>
       </header>
       {mediaNotice && <div className="source-notice recovery-notice" role={mediaNotice.category === "cancelled" ? "status" : "alert"}>
-        <span>Media action {mediaNotice.category}: {mediaNotice.message}</span>
+        <span>Media action {mediaNotice.category}: {mediaNotice.message} {mediaRecovery(mediaNotice.category)}</span>
         <button className="button secondary" onClick={() => setMediaNotice(null)}>Dismiss media message</button>
       </div>}
       {exportState.result && <p className="source-notice" role="status" data-delivery-outcome={exportState.result.delivery}>
         {exportState.result.delivery === "download-started" ? "Last export: Download started. Video/audio structure was checked; final disk storage is controlled by your browser." : "Last export: Host accepted the checked video. Host acceptance does not confirm final device storage."}
       </p>}
+      {exportState.phase === "cancelled" && <div className="source-notice recovery-notice" role="status">
+        <span>Export cancelled. You can keep editing or retry.</span>
+        <button className="button secondary" onClick={handleExport}>Retry export</button>
+      </div>}
       {(recovery.available || recovery.status === "error" || recovery.status === "unavailable") && (
         <section className="source-notice recovery-notice" aria-label="Local project recovery"
           role={recovery.status === "error" || recovery.status === "unavailable" ? "alert" : "status"}>
@@ -1040,8 +1048,9 @@ export default function App() {
       )}
       {status === "FATAL ERROR" && (
         <div className="source-notice" role="alert">
-          <span>{errorDetail}</span>
+          <span>Media tools could not start. Check your connection and retry; save your project before reloading this page.</span>
           <button className="button secondary" onClick={() => void loadMediaTools()}>Retry media tools</button>
+          <details><summary>Technical details</summary><p>{errorDetail}</p></details>
         </div>
       )}
       {mediaAssets.some(
@@ -1088,63 +1097,15 @@ export default function App() {
               fitMode={fitMode}
               showSafeZones={showSafeZones}
             />
-            {(isExporting || exportFailed) && (
-              <div
-                className="export-overlay"
-                data-export-job={exportState.jobId}
-                data-export-phase={exportState.phase}
-                role={exportFailed ? "alert" : undefined}
-              >
-                <div className="export-message">
-                  <Icon name={exportFailed ? "alert" : "video"} size={32} />
-                  <h2>
-                    {exportFailed
-                      ? "Couldn’t export this video"
-                      : "Preparing your video"}
-                  </h2>
-                  {!exportFailed ? (
-                    <>
-                      <p>{Math.round(exportProgress)}% complete</p>
-                      <progress
-                        max="100"
-                        value={exportProgress}
-                        aria-label="Video export progress"
-                      />
-                      <button
-                        className="button secondary"
-                        onClick={exportJobs.cancel}
-                        disabled={!exportState.cancellable}
-                      >
-                        Cancel export
-                      </button>
-                      <p role="status">
-                        {exportState.phase === "cancelling" || exportState.phase === "cleaning"
-                          ? "Stopping and releasing media…"
-                          : !exportState.cancellable ? "Waiting for the save adapter; delivery may have started." : "You can cancel and keep editing."}
-                      </p>
-                    </>
-                  ) : (
-                    <p>{exportState.error || errorDetail}</p>
-                  )}
-                  <details className="technical-details">
-                    <summary>Technical details</summary>
-                    <div className="export-log">
-                      {exportLogs.map((log, index) => (
-                        <p key={index}>{log}</p>
-                      ))}
-                    </div>
-                  </details>
-                  {exportFailed && (
-                    <button
-                      className="button primary"
-                      onClick={exportJobs.dismissFailure}
-                    >
-                      Back to editing
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
+            {(isExporting || exportFailed) && <ExportFeedback
+              key={exportState.jobId} state={exportState}
+              assetName={[...mediaAssets, ...audioTracks].find(asset => asset.id === exportState.failure?.assetId)?.name}
+              onCancel={exportJobs.cancel} onRetry={handleExport} onClose={exportJobs.dismissFailure}
+              onSaveProject={() => void handleSaveProject()}
+              onInspect={mediaAssets.some(asset => asset.id === exportState.failure?.assetId) ? () => {
+                exportJobs.dismissFailure(); setSelectedAssetId(exportState.failure!.assetId!);
+              } : undefined}
+            />}
           </div>
           <label className="playhead-control">
             Playhead

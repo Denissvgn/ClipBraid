@@ -817,8 +817,8 @@ input[type="range"]::-moz-range-thumb {
   margin-left: auto;
 }
 .export-overlay {
-  position: absolute;
-  inset: 0;
+  position: relative;
+  width: 100%;
   z-index: var(--z-overlay);
   background: var(--color-preview);
   color: var(--color-preview-ink);
@@ -829,7 +829,7 @@ input[type="range"]::-moz-range-thumb {
   overflow: auto;
 }
 .export-message {
-  margin: auto;
+  margin: 0 auto auto;
   width: min(100%, 460px);
   display: grid;
   justify-items: center;
@@ -855,10 +855,24 @@ input[type="range"]::-moz-range-thumb {
 .technical-details {
   width: 100%;
   font-size: var(--text-xs);
+  overflow-wrap: anywhere;
 }
 .technical-details summary {
   padding: var(--space-md);
   cursor: pointer;
+}
+.feedback-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-sm);
+}
+.technical-details textarea {
+  display: block;
+  width: 100%;
+  margin-block: var(--space-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
 }
 .export-log {
   max-height: 160px;
@@ -1229,6 +1243,19 @@ input[type="range"]::-moz-range-thumb {
 
 .export-overlay :focus-visible {
   outline-color: var(--color-focus-on-dark);
+}
+.editor-app:has(.export-overlay) {
+  height: auto;
+  overflow: visible;
+}
+.editor-app:has(.export-overlay) .editor-workspace {
+  min-height: 500px;
+}
+.preview-stage:has(.export-overlay) {
+  min-height: 360px;
+}
+.preview-stage:has(.export-overlay) .preview-surface {
+  display: none;
 }
 select:hover:not(:disabled),
 .diagnostics-filter input:hover:not(:disabled) {
