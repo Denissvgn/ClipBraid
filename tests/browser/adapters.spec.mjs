@@ -68,3 +68,27 @@ test("Flow recording measures actual bytes and awaits a cancellation acknowledge
   },base64);
   expect(result.duration).toBeCloseTo(1000,0);expect(result.calls).toBe(1);expect(result.category).toBe("cancelled");
 });
+for(const action of ["cancel","replace"])test(`recording ${action} during source staging cannot commit a late track`,async({page})=>{
+  await syntheticMicrophone(page);
+  await page.addInitScript(()=>{
+    const digest=crypto.subtle.digest.bind(crypto.subtle);
+    crypto.subtle.digest=(...args)=>{
+      if(window.holdRecordingHash&&new Uint8Array(args[1])[0]!==0x89){
+        window.holdRecordingHash=false;return new Promise(resolve=>{window.releaseRecordingHash=()=>digest(...args).then(resolve)});
+      }
+      return digest(...args);
+    };
+  });
+  await openEditor(page);await loadDraft(page,draft([await asset("landscape-red.png")]));
+  await page.getByText("Record voice-over",{exact:true}).click();await page.getByRole("button",{name:"Start recording",exact:true}).click();
+  await expect(page.getByRole("button",{name:"Stop recording and keep audio",exact:true})).toBeVisible();await page.waitForTimeout(200);
+  await page.evaluate(()=>{window.holdRecordingHash=true});await page.getByRole("button",{name:"Stop recording and keep audio",exact:true}).click();
+  await page.waitForFunction(()=>window.releaseRecordingHash);
+  if(action==="cancel")await page.getByRole("button",{name:"Cancel recording",exact:true}).click();
+  else await loadDraft(page,draft([await asset("portrait-blue.png",{name:"Replacement during recording"})]));
+  await page.evaluate(()=>window.releaseRecordingHash());await page.evaluate(()=>window.__clipbraidE2E.projectWorkIdle());
+  await expect(page.locator("[data-audio-track]")).toHaveCount(0);
+  expect(await page.evaluate(()=>window.__clipbraidE2E.mediaInventory().sources.length)).toBe(1);
+  if(action==="cancel")await expect(page.locator('[data-editor-status="RECORD CANCELLED"]')).toBeVisible();
+  else await expect(page.getByRole("button",{name:"Edit Replacement during recording",exact:true})).toBeVisible();
+});

@@ -6,7 +6,7 @@ export const PROJECT_SCHEMA_VERSION = 2;
 export const MAX_PROJECT_BYTES = 256 * 1024 * 1024;
 /** Maximum accepted decoded media payload size in bytes (256 MiB). */
 export const MAX_MEDIA_BYTES = 256 * 1024 * 1024;
-/** Maximum accepted absolute timeline position or duration: 24 hours. */
+/** Maximum accepted clip/track start or source duration: 24 hours per field. */
 export const MAX_TIMELINE_SECONDS = 24 * 60 * 60;
 const MAX_SOURCE_FPS = 1000;
 const MAX_SOURCE_DIMENSION = 100000;
@@ -132,6 +132,7 @@ export interface ProjectSourcePayload {
 }
 export function parseProject(textValue: string) {
   assertProjectSize(textValue.length);
+  assertProjectSize(new Blob([textValue]).size);
   let parsed: unknown;
   try {
     parsed = JSON.parse(textValue);
@@ -234,6 +235,12 @@ function validateMetadata(data: Record<string, unknown>, resolveSource: (item: R
     const { item, ...base } = common(value);
     return base;
   });
+  // Each start/duration is bounded above, so a valid interval can end as late
+  // as twice that bound. Seeking to that end must remain saveable.
+  const maximumPlayhead = Math.max(
+    mediaAssets.reduce((end, asset) => Math.max(end, asset.startTime + asset.duration), MAX_TIMELINE_SECONDS),
+    audioTracks.reduce((end, track) => Math.max(end, track.startTime + track.duration), MAX_TIMELINE_SECONDS),
+  );
   return {
     mediaAssets,
     audioTracks,
@@ -255,6 +262,7 @@ function validateMetadata(data: Record<string, unknown>, resolveSource: (item: R
       data.currentTime ?? 0,
       "playhead",
       -MAX_TIMELINE_SECONDS,
+      maximumPlayhead,
     ),
   };
 }
@@ -284,7 +292,7 @@ export async function serializeProject(
     mediaAssets.push({
       id: clip.id,
       mediaId: clip.mediaId,
-      base64: await sourceBase64(clip.sourceId),
+      base64: "",
       mimeType: clip.mimeType,
       type: clip.type,
       name: clip.name,
@@ -309,7 +317,7 @@ export async function serializeProject(
     audioTracks.push({
       id: track.id,
       mediaId: track.mediaId,
-      base64: await sourceBase64(track.sourceId),
+      base64: "",
       mimeType: track.mimeType,
       name: track.name,
       startTime: track.startTime,
@@ -317,7 +325,7 @@ export async function serializeProject(
       ...(track.gain === undefined ? {} : { gain: track.gain }),
     });
   }
-  const json = JSON.stringify({
+  const document = {
     schemaVersion: PROJECT_SCHEMA_VERSION,
     mediaAssets,
     audioTracks,
@@ -325,7 +333,29 @@ export async function serializeProject(
     fitMode: state.fitMode,
     transitionDuration: state.transitionDuration,
     currentTime: state.currentTime,
-  });
+  };
+  let bytes = new Blob([JSON.stringify(document)]).size;
+  assertProjectSize(bytes);
+  const payloads = new Map<string, { data: string; bytes: number }>();
+  const sources = [...state.mediaAssets, ...state.audioTracks];
+  const entries = [...mediaAssets, ...audioTracks];
+  for (let index = 0; index < entries.length; index++) {
+    const id = sources[index].sourceId;
+    let payload = payloads.get(id);
+    if (!payload) {
+      const data = text(await sourceBase64(id), "media data");
+      assertMediaPayloadSize(data.length);
+      // A lower bound rejects a large payload before JSON escaping/copying it.
+      assertProjectSize(bytes + data.length);
+      const encodedBytes = /^[\x20-\x21\x23-\x5b\x5d-\x7e]*$/.test(data)
+        ? data.length : new Blob([JSON.stringify(data)]).size - 2;
+      payload = { data, bytes: encodedBytes }; payloads.set(id, payload);
+    }
+    bytes += payload.bytes;
+    assertProjectSize(bytes);
+    entries[index].base64 = payload.data;
+  }
+  const json = JSON.stringify(document);
   assertProjectSize(new Blob([json]).size);
   return json;
 }

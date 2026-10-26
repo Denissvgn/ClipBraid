@@ -16,6 +16,7 @@ interface MediaPreviewProps {
   aspectRatio: "16:9" | "9:16" | "1:1";
   fitMode: "contain" | "cover";
   showSafeZones: boolean;
+  seekRevision?: number;
 }
 export const MediaPreview: React.FC<MediaPreviewProps> = ({
   mediaAssets,
@@ -25,6 +26,7 @@ export const MediaPreview: React.FC<MediaPreviewProps> = ({
   aspectRatio,
   fitMode,
   showSafeZones,
+  seekRevision = 0,
 }) => {
   const mountedAssets = useMemo(
     () =>
@@ -76,6 +78,7 @@ export const MediaPreview: React.FC<MediaPreviewProps> = ({
               fitMode={fitMode}
               opacity={calculateOpacity(asset)}
               zIndex={isIntervalActive(asset, currentTime) ? 2 : 1}
+              seekRevision={seekRevision}
             />
           ))}
           {showSafeZones && (

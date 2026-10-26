@@ -17,6 +17,7 @@ import {
   type ProjectSnapshot,
 } from "./services/project";
 import { MediaSourceStore, type SourceLease } from "./services/mediaSources";
+import { ProjectWork, type ProjectWorkUnit } from "./services/projectWork";
 import { ExportJobs } from "./services/exportJob";
 import { runExportPipeline } from "./services/exportPipeline";
 import { ProxyQueue } from "./services/proxyQueue";
@@ -73,6 +74,7 @@ const base64ToUint8Array = (base64: string): Uint8Array<ArrayBuffer> => {
  *  (source metadata only; originals are never replaced). */
 const probeVideoSource = async (
   bytes: Blob,
+  signal?: AbortSignal,
 ): Promise<{
   hasAudio: boolean;
   fps: number;
@@ -83,7 +85,10 @@ const probeVideoSource = async (
     source: new BlobSource(bytes),
     formats: ALL_FORMATS,
   });
+  const stop = () => input.dispose();
+  signal?.addEventListener("abort", stop, { once: true });
   try {
+    signal?.throwIfAborted();
     const video = await input.getPrimaryVideoTrack();
     if (!video) throw new Error("The selected file has no video track.");
     const fps = (
@@ -96,12 +101,14 @@ const probeVideoSource = async (
       height: await video.getCodedHeight(),
     };
   } finally {
+    signal?.removeEventListener("abort", stop);
     input.dispose();
   }
 };
 const probeDuration = (
   blobUrl: string,
   type: "image" | "video" | "audio",
+  signal?: AbortSignal,
 ): Promise<number> => {
   return new Promise((resolve, reject) => {
     const element = document.createElement(type === "image" ? "img" : type);
@@ -111,6 +118,7 @@ const probeDuration = (
     );
     const finish = (error?: Error, duration?: number) => {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
       element.onload = null;
       element.onerror = null;
       if (element instanceof HTMLMediaElement) {
@@ -121,6 +129,9 @@ const probeDuration = (
       if (error) reject(error);
       else resolve(duration!);
     };
+    const abort = () => finish(signal?.reason ?? new DOMException("Action cancelled", "AbortError"));
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) { abort(); return; }
     element.onerror = () => finish(new Error("Cannot read this media file."));
     if (element instanceof HTMLMediaElement) {
       element.preload = "metadata";
@@ -139,14 +150,25 @@ const base64ToBlob = (base64: string, mimeType: string): Blob => {
   if (!bytes.length) throw new Error("Empty media data.");
   return new Blob([bytes], { type: mimeType });
 };
-const probeAudioDuration = async (blob: Blob, url: string): Promise<number> => {
-  try { await probeDuration(url, "audio"); }
+const probeAudioDuration = async (blob: Blob, url: string, signal?: AbortSignal): Promise<number> => {
+  try { await probeDuration(url, "audio", signal); }
   catch (error) {
     // Streamable WebM recordings can omit duration metadata; inspect packets.
     if (!(error instanceof Error) || error.message !== "Invalid media duration.") throw error;
   }
-  return (await recordedDuration(blob)) / 1000;
+  return (await recordedDuration(blob, signal)) / 1000;
 };
+const readProjectText = (file: File, signal: AbortSignal): Promise<string> => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  const cleanup = () => { signal.removeEventListener("abort", abort); reader.onload = null; reader.onerror = null; reader.onabort = null; };
+  const abort = () => { cleanup(); reader.abort(); reject(signal.reason ?? new DOMException("Project load cancelled", "AbortError")); };
+  reader.onload = () => { cleanup(); resolve(String(reader.result)); };
+  reader.onerror = () => { const error = reader.error ?? new Error("Could not read project file."); cleanup(); reject(error); };
+  reader.onabort = abort;
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  else try { reader.readAsText(file); } catch (error) { cleanup(); reject(error); }
+});
 const blobToBase64 = (blob: Blob): Promise<string> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -161,6 +183,7 @@ export default function App() {
   const [audioTracks, setAudioTracks] = useState<AudioFragment[]>([]);
   const [projectFilename, setProjectFilename] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
+  const [seekRevision, setSeekRevision] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [zoom, setZoom] = useState(40);
   const [status, setStatus] = useState("BOOTING...");
@@ -215,6 +238,9 @@ export default function App() {
   // store; state holds clip instances that reference sources by ID.
   const storeRef = useRef<MediaSourceStore | null>(null);
   if (!storeRef.current) storeRef.current = new MediaSourceStore();
+  const projectWorkRef = useRef<ProjectWork | null>(null);
+  if (!projectWorkRef.current) projectWorkRef.current = new ProjectWork(storeRef.current);
+  const projectWork = projectWorkRef.current;
   const exportJobsRef = useRef<ExportJobs | null>(null);
   if (!exportJobsRef.current) exportJobsRef.current = new ExportJobs(storeRef.current, runExportPipeline, {}, BUILD_ID);
   const exportJobs = exportJobsRef.current;
@@ -261,12 +287,12 @@ export default function App() {
     return ffmpegService.load(message => {
       if (attempt === bootAttemptRef.current) logEvent("info", message);
     }).then(() => {
-      if (attempt === bootAttemptRef.current && !exportJobs.getSnapshot().active) setStatus("READY");
+      if (attempt === bootAttemptRef.current && !exportJobs.getSnapshot().active && !projectWork.busy) setStatus("READY");
     }).catch(error => {
       if (attempt !== bootAttemptRef.current) return;
       setStatus("FATAL ERROR"); setErrorDetail(`FFmpeg failed to load: ${error.message}`);
     });
-  }, [exportJobs]);
+  }, [exportJobs, projectWork]);
   useEffect(() => {
     void loadMediaTools();
     return () => { bootAttemptRef.current++; };
@@ -281,6 +307,7 @@ export default function App() {
   }, [mediaAssets, audioTracks]);
   useEffect(() => {
     return () => {
+      projectWork.invalidate();
       exportJobs.dispose();
       recordingEpoch.current++; recordingRef.current?.cancel.abort();
       proxyQueue.dispose();
@@ -306,6 +333,7 @@ export default function App() {
   const seekTo = useCallback(
     (t: number) => {
       const clamped = clampPlayhead(t, totalDuration);
+      setSeekRevision(value => value + 1);
       setCurrentTime(clamped);
       if (isPlaying) {
         startTimeRef.current = clamped;
@@ -330,9 +358,10 @@ export default function App() {
   }, [currentTime, totalDuration]);
   const handleImportMedia = async () => {
     setMediaNotice(null);
-    const tx = storeRef.current!.beginTransaction();
+    const work = projectWork.beginEdit(), tx = work.tx;
     try {
-      const selected = await Flow.media.select({ filter: "all" });
+      const selected = await Flow.media.select({ filter: "all", signal: work.signal });
+      work.check();
       if (!selected) {
         tx.rollback();
         return;
@@ -346,14 +375,14 @@ export default function App() {
       ]);
       const probeLease = tx.acquire(asset.sourceId, "import-probe");
       try {
-        const dur = await probeDuration(probeLease.url, selected.type);
+        const dur = await probeDuration(probeLease.url, selected.type, work.signal);
         const {
           hasAudio,
           fps: sourceFps,
           width: sourceWidth,
           height: sourceHeight,
         } = selected.type === "video"
-          ? await probeVideoSource(asset.bytes)
+          ? await probeVideoSource(asset.bytes, work.signal)
           : { hasAudio: false, fps: 0, width: 0, height: 0 };
         const newAssetBase: MediaAsset = {
           id: crypto.randomUUID(),
@@ -374,11 +403,11 @@ export default function App() {
           sourceWidth: sourceWidth || undefined,
           sourceHeight: sourceHeight || undefined,
         };
-        tx.pin(asset.sourceId);
+        work.check(); tx.pin(asset.sourceId);
         setMediaAssets((prev) =>
           recalculateMediaStartTimes([...prev, newAssetBase]),
         );
-        tx.commit();
+        work.commit();
         sysLog(
           "import",
           `Clip: ${selected.name} (${selected.type}, ${dur.toFixed(1)}s${sourceFps ? `, ${Number(sourceFps.toFixed(3))}fps` : ""}${sourceWidth ? `, ${sourceWidth}x${sourceHeight}` : ""})`,
@@ -388,17 +417,19 @@ export default function App() {
         probeLease.release();
       }
     } catch (err) {
-      mediaFailure(err);
       tx.rollback();
-      setStatus("IMPORT ERROR");
+      if (!work.isCurrent()) return;
+      const error = mediaFailure(work.signal.aborted ? work.signal.reason : err);
+      setStatus(error.category === "cancelled" ? "IMPORT CANCELLED" : "IMPORT ERROR");
       sysLog("error", `Clip import failed: ${String(err).slice(0, 120)}`);
-    }
+    } finally { work.finish(); }
   };
   const handleImportGalleryAudio = async () => {
     setMediaNotice(null);
-    const tx = storeRef.current!.beginTransaction();
+    const work = projectWork.beginEdit(), tx = work.tx;
     try {
-      const selected = await Flow.media.select({ filter: "audio" });
+      const selected = await Flow.media.select({ filter: "audio", signal: work.signal });
+      work.check();
       if (!selected) {
         tx.rollback();
         return;
@@ -413,11 +444,11 @@ export default function App() {
       const probeLease = tx.acquire(asset.sourceId, "import-probe");
       let duration: number;
       try {
-        duration = await probeAudioDuration(asset.bytes, probeLease.url);
+        duration = await probeAudioDuration(asset.bytes, probeLease.url, work.signal);
       } finally {
         probeLease.release();
       }
-      tx.pin(asset.sourceId);
+      work.check(); tx.pin(asset.sourceId);
       setAudioTracks((prev) => [
         ...prev,
         {
@@ -430,18 +461,19 @@ export default function App() {
           duration,
         },
       ]);
-      tx.commit();
+      work.commit();
       sysLog(
         "import",
         `Audio track: ${selected.name} (${duration.toFixed(1)}s @ ${currentTime.toFixed(1)}s)`,
       );
       setStatus("READY");
     } catch (err) {
-      mediaFailure(err);
       tx.rollback();
-      setStatus("AUDIO ERROR");
+      if (!work.isCurrent()) return;
+      const error = mediaFailure(work.signal.aborted ? work.signal.reason : err);
+      setStatus(error.category === "cancelled" ? "AUDIO CANCELLED" : "AUDIO ERROR");
       sysLog("error", `Audio import failed: ${String(err).slice(0, 120)}`);
-    }
+    } finally { work.finish(); }
   };
   const handleImportLocalAudio = async (
     event: React.ChangeEvent<HTMLInputElement>,
@@ -451,7 +483,7 @@ export default function App() {
     const startTime = currentTime;
     const staged: AudioFragment[] = [];
     setMediaNotice(null);
-    const tx = storeRef.current!.beginTransaction();
+    const work = projectWork.beginEdit(), tx = work.tx;
     setStatus("IMPORTING AUDIO...");
     try {
       const mimeTypes = files.map(audioFileType);
@@ -464,7 +496,7 @@ export default function App() {
         const probeLease = tx.acquire(asset.sourceId, "import-probe");
         let duration: number;
         try {
-          duration = await probeAudioDuration(asset.bytes, probeLease.url);
+          duration = await probeAudioDuration(asset.bytes, probeLease.url, work.signal);
         } finally {
           probeLease.release();
         }
@@ -481,21 +513,23 @@ export default function App() {
           duration,
         });
       }
-      staged.forEach((track) => tx.pin(track.sourceId));
+      work.check(); staged.forEach((track) => tx.pin(track.sourceId));
       setAudioTracks((previous) => [...previous, ...staged]);
-      tx.commit();
+      work.commit();
       sysLog(
         "import",
         `Added ${staged.length} audio file(s) in parallel at ${startTime.toFixed(2)}s`,
       );
       setStatus("READY");
     } catch (error) {
-      mediaFailure(error);
       tx.rollback();
-      setStatus("AUDIO ERROR");
+      if (!work.isCurrent()) return;
+      const failure = mediaFailure(work.signal.aborted ? work.signal.reason : error);
+      setStatus(failure.category === "cancelled" ? "AUDIO CANCELLED" : "AUDIO ERROR");
       sysLog("error", `Audio import failed: ${String(error).slice(0, 120)}`);
     } finally {
-      event.target.value = "";
+      if (work.isCurrent()) event.target.value = "";
+      work.finish();
     }
   };
   const handleRecord = async () => {
@@ -506,7 +540,11 @@ export default function App() {
     setMediaNotice(null);
     const capture = { cancel: new AbortController(), stop: new AbortController(), epoch: ++recordingEpoch.current };
     recordingRef.current = capture;
-    const tx = storeRef.current!.beginTransaction();
+    const work = projectWork.beginEdit(), tx = work.tx;
+    const cancelCapture = () => capture.cancel.abort(work.signal.reason);
+    const cancelStaging = () => work.cancel(capture.cancel.signal.reason);
+    work.signal.addEventListener("abort", cancelCapture, { once: true });
+    capture.cancel.signal.addEventListener("abort", cancelStaging, { once: true });
     try {
       const audio = await Flow.microphone.record({
         durationMs: recDuration * 1000, signal: capture.cancel.signal, stopSignal: capture.stop.signal,
@@ -519,7 +557,7 @@ export default function App() {
           mimeType: audio.mimeType,
         },
       ]);
-      tx.pin(asset.sourceId);
+      work.check(); capture.cancel.signal.throwIfAborted(); tx.pin(asset.sourceId);
       const timeStr = new Date().toLocaleTimeString("en-US", { hour12: false });
       const id = crypto.randomUUID();
       setAudioTracks((prev) => [
@@ -534,7 +572,7 @@ export default function App() {
           duration: audio.durationMs / 1000,
         },
       ]);
-      tx.commit();
+      work.commit();
       setStatus("READY");
       sysLog(
         "import",
@@ -542,13 +580,15 @@ export default function App() {
       );
     } catch (err) {
       tx.rollback();
-      if (capture.epoch !== recordingEpoch.current) return;
-      const error = mediaFailure(err);
+      if (!work.isCurrent() || capture.epoch !== recordingEpoch.current) return;
+      const error = mediaFailure(work.signal.aborted ? work.signal.reason : err);
       setStatus(error.category === "cancelled" ? "RECORD CANCELLED" : "RECORD ERROR");
       sysLog("error", `Voice recording failed: ${String(err).slice(0, 120)}`);
     } finally {
-      if (recordingRef.current === capture) recordingRef.current = null;
-      setIsRecording(false);
+      work.signal.removeEventListener("abort", cancelCapture);
+      capture.cancel.signal.removeEventListener("abort", cancelStaging);
+      work.finish();
+      if (recordingRef.current === capture) { recordingRef.current = null; setIsRecording(false); }
     }
   };
   const togglePlayback = () => {
@@ -721,10 +761,12 @@ export default function App() {
       saveInFlightRef.current = false;
     }
   };
-  const loadProjectState = async (data: ProjectSnapshot, sources: { sourceId: string; bytes: Blob; mimeType: string }[]): Promise<boolean> => {
+  const loadProjectState = async (data: ProjectSnapshot, sources: { sourceId: string; bytes: Blob; mimeType: string }[],
+    work: ProjectWorkUnit, options: { filename?: string | null; ui?: RecoveryData["record"]["ui"] } = {}): Promise<boolean> => {
+    work.check();
     setMediaNotice(null);
     setStatus("LOADING PROJECT...");
-    const tx = storeRef.current!.beginTransaction();
+    const tx = work.tx;
     try {
       data = validateProjectMetadata(data);
       const ids = new Set(sources.map(source => source.sourceId));
@@ -738,6 +780,7 @@ export default function App() {
           mimeType: source.mimeType,
         })),
       );
+      work.check();
       const stagedIds = [...new Set(staged.map((asset) => asset.sourceId))];
       const idMap = new Map(
         sources.map((source, index) => [
@@ -771,12 +814,17 @@ export default function App() {
       setFitMode(data.fitMode);
       setTransitionDuration(data.transitionDuration);
       setCurrentTime(restoredTime);
+      setProjectFilename(options.filename ?? null);
+      if (options.ui) {
+        setExportQuality(options.ui.exportQuality); setZoom(options.ui.zoom);
+        setShowSafeZones(options.ui.showSafeZones); setIsTheaterMode(options.ui.isTheaterMode);
+      }
       startTimeRef.current = restoredTime;
       cleanupRef.current = {
         mediaAssets: restoredMedia,
         audioTracks: restoredAudio,
       };
-      tx.commit();
+      work.commit();
       sysLog(
         "import",
         `Project loaded: ${restoredMedia.length} clips, ${restoredAudio.length} audio tracks`,
@@ -785,49 +833,54 @@ export default function App() {
       return true;
     } catch (err) {
       tx.rollback();
+      if (!work.isCurrent()) return false;
       setStatus("LOAD ERROR");
       setMediaNotice({ category: "project", message: "Could not open this project. Your current project is still available." });
       sysLog("error", `Project load failed: ${String(err).slice(0, 120)}`);
       return false;
     }
   };
-  const loadProjectText = async (text: string, filename?: string): Promise<boolean> => {
+  const loadProjectText = async (text: string, filename?: string, request?: ProjectWorkUnit): Promise<boolean> => {
+    const work = request ?? projectWork.beginLoad();
     try {
+      work.check();
       const data = parseProject(text);
-      const loaded = await loadProjectState(data, data.sources.map(source => ({
+      return await loadProjectState(data, data.sources.map(source => ({
         sourceId: source.sourceId, bytes: base64ToBlob(source.base64, source.mimeType), mimeType: source.mimeType,
-      })));
-      if (loaded) setProjectFilename(normalizeProjectFilename(filename));
-      return loaded;
+      })), work, { filename: normalizeProjectFilename(filename) });
     } catch (error) {
+      if (!work.isCurrent()) return false;
       setMediaNotice({ category: "project", message: "Could not open this project. Your current project is still available." });
       setStatus("LOAD ERROR"); sysLog("error", `Project load failed: ${String(error).slice(0, 120)}`); return false;
-    }
+    } finally { if (!request) work.finish(); }
   };
   async function restoreLocal(data: RecoveryData) {
-    const restored = await loadProjectState(data.record.snapshot, data.sources);
-    if (restored) {
-      setExportQuality(data.record.ui.exportQuality); setZoom(data.record.ui.zoom);
-      setShowSafeZones(data.record.ui.showSafeZones); setIsTheaterMode(data.record.ui.isTheaterMode);
-      setProjectFilename(data.record.ui.projectFilename ?? null);
-    }
-    return restored;
+    const work = projectWork.beginLoad();
+    try { return await loadProjectState(data.record.snapshot, data.sources, work,
+      { filename: data.record.ui.projectFilename, ui: data.record.ui }); }
+    finally { work.finish(); }
   }
   const handleLoadProject = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    const work = projectWork.beginLoad();
+    setMediaNotice(null); setStatus("LOADING PROJECT...");
     // Gate on the real byte size before reading, parsing or allocating anything.
     // File reads are inside the same error boundary as staged load failures,
     // and the input is reset even when the host filesystem read rejects.
     try {
       assertProjectSize(file.size);
-      await loadProjectText(await file.text(), file.name);
+      const text = await readProjectText(file, work.signal);
+      work.check();
+      await loadProjectText(text, file.name, work);
     } catch (err) {
+      if (!work.isCurrent()) return;
       setStatus("LOAD ERROR");
       setMediaNotice({ category: "project", message: "Could not read this project file. Your current project is still available." });
       sysLog("error", `Project load failed: ${String(err).slice(0, 120)}`);
     } finally {
-      e.target.value = "";
+      if (work.isCurrent()) e.target.value = "";
+      work.finish();
     }
   };
   const handleRelinkOriginal = async () => {
@@ -835,15 +888,17 @@ export default function App() {
     const target = cleanupRef.current.mediaAssets.find(asset => asset.id === selectedAssetId);
     if (!target || target.type !== "video") return;
     setMediaNotice(null);
-    const tx = storeRef.current!.beginTransaction();
+    const work = projectWork.beginEdit(), tx = work.tx;
     try {
-      const selected = await Flow.media.select({ filter: "video" });
+      const selected = await Flow.media.select({ filter: "video", signal: work.signal });
+      work.check();
       if (!selected) { tx.rollback(); return; }
       if (!selected.mimeType.startsWith("video/")) throw new Error("Choose an original video file.");
       const [source] = await tx.stage([{ bytes: base64ToBlob(selected.base64, selected.mimeType), mimeType: selected.mimeType }]);
       const lease = tx.acquire(source.sourceId);
-      const duration = await probeDuration(lease.url, "video");
-      const metadata = await probeVideoSource(source.bytes);
+      const duration = await probeDuration(lease.url, "video", work.signal);
+      const metadata = await probeVideoSource(source.bytes, work.signal);
+      work.check();
       const current = cleanupRef.current.mediaAssets;
       if (!current.some(asset => asset.sourceId === target.sourceId)) throw new Error("This source is no longer in the project.");
       const updated = current.map(asset => {
@@ -854,13 +909,14 @@ export default function App() {
           hasAudio: metadata.hasAudio, sourceFps: metadata.fps, sourceWidth: metadata.width,
           sourceHeight: metadata.height, normalized: false };
       });
-      tx.pin(source.sourceId); setMediaAssets(updated); tx.commit();
+      tx.pin(source.sourceId); setMediaAssets(updated); work.commit();
       setStatus("READY"); sysLog("import", "Original video relinked; clip selections were preserved.");
     } catch (error) {
-      tx.rollback(); setStatus("RELINK ERROR");
+      tx.rollback(); if (!work.isCurrent()) return;
+      setStatus("RELINK ERROR");
       setMediaNotice({ category: "relink", message: "Could not relink the original file." });
       sysLog("error", `Could not relink original: ${String(error)}`);
-    }
+    } finally { work.finish(); }
   };
   // Test/measurement hook (test-mode dev server + ?e2e=1 only): loads a
   // draft from a URL and run the export — the local measurement harness.
@@ -874,9 +930,14 @@ export default function App() {
       return;
     (window as any).__clipbraidE2E = {
       loadFromUrl: async (url: string) => {
-        const text = await (await fetch(url)).text();
-        return loadProjectTextRef.current(text);
+        const work = projectWork.beginLoad();
+        try {
+          const text = await (await fetch(url, { signal: work.signal })).text();
+          work.check(); return await loadProjectTextRef.current(text, undefined, work);
+        } finally { work.finish(); }
       },
+      loadText: (text: string, filename?: string) => loadProjectTextRef.current(text, filename),
+      projectWorkIdle: projectWork.idle,
       normalizeAll: async () => {
         proxyQueue.request(cleanupRef.current.mediaAssets);
         await proxyQueue.idle();
@@ -958,6 +1019,7 @@ export default function App() {
         sourceUrl={sourceUrl}
         currentTime={currentTime}
         isPlaying={isPlaying}
+        seekRevision={seekRevision}
       />
       <input
         type="file"
@@ -1112,6 +1174,7 @@ export default function App() {
               aspectRatio={aspectRatio}
               fitMode={fitMode}
               showSafeZones={showSafeZones}
+              seekRevision={seekRevision}
             />
             {(isExporting || exportFailed) && <ExportFeedback
               key={exportState.jobId} state={exportState}

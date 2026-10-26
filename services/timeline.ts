@@ -53,7 +53,7 @@ export function projectDuration(
 ): number {
   const end = (max: number, interval: TimelineInterval) =>
     Math.max(max, intervalEnd(interval));
-  return Math.max(media.reduce(end, 1), audio.reduce(end, 1));
+  return Math.max(media.reduce(end, 0), audio.reduce(end, 0));
 }
 
 export function timelineViewportDuration(
@@ -112,7 +112,7 @@ export function trimmedDuration(
   asset: Pick<MediaAsset, "trimStart" | "trimEnd" | "originalDuration">,
 ): number {
   const window = sourceWindow(asset);
-  return Math.max(0.1, window.end - window.start);
+  return window.end - window.start;
 }
 
 export function sourceTimeAt(
@@ -124,9 +124,12 @@ export function sourceTimeAt(
 ): number {
   const window = sourceWindow(asset);
   const last = Math.max(window.start, window.end - 1e-3);
+  const selected = time - asset.startTime + window.start;
   return Math.max(
     window.start,
-    Math.min(time - asset.startTime + window.start, last),
+    // Keep valid in-range queries exact. The conservative last-frame guard
+    // is only for requests at/beyond the source end, never a trim adjustment.
+    selected < window.end ? selected : last,
   );
 }
 
@@ -162,7 +165,7 @@ export function frameCount(duration: number, fps: number): number {
     Number.isFinite(fps) &&
     duration > 0 &&
     fps > 0
-    ? Math.ceil(duration * fps)
+    ? Math.max(1, Math.ceil(duration * fps - 1e-9))
     : 0;
 }
 
@@ -224,8 +227,8 @@ export function clipOpacity(
   return Math.max(0, Math.min(1, weight));
 }
 
-// Short adjacent clips can produce three-way overlaps. Normalize weights so
-// additive blending cannot brighten the picture above the original sources.
+// Short adjacent clips can produce three-way overlaps. Keep a partition of
+// unity wherever visuals are active, avoiding artificial brightness/darkness.
 // Cache one timestamp: export asks for several clips at the same frame time.
 export function createOpacitySampler(media: MediaAsset[]) {
   const next = nextAssets(media);
@@ -247,8 +250,14 @@ export function createOpacitySampler(media: MediaAsset[]) {
         weights.set(clip.id, weight);
         sum += weight;
       }
-      if (sum > 1)
+      if (sum > 0 && sum !== 1)
         for (const [id, weight] of weights) weights.set(id, weight / sum);
+      if (sum === 0) {
+        // A short overlay can end before an older clip. Its completed fade
+        // must not leave the remaining, active visual permanently invisible.
+        const visible = activeIntervals(media, time).at(-1);
+        if (visible) weights.set(visible.id, 1);
+      }
     }
     return weights.get(asset.id) ?? 0;
   };

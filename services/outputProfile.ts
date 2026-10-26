@@ -1,5 +1,5 @@
 import type { AssetInventory } from "./mediaProbe";
-import { estimateExport, exportFrameRate, type ExportQuality } from "./timeline";
+import { estimateExport, exportFrameRate, frameCount, type ExportQuality } from "./timeline";
 export interface OutputProfile {
   width: number; height: number; fps: number; fpsNumerator: number; fpsDenominator: number;
   frames: number; duration: number; videoBitrate: number; audioBitrate: number;
@@ -14,7 +14,7 @@ export function outputProfile(quality: ExportQuality, aspect: "16:9" | "9:16" | 
   const canonical = [[24000, 1001], [24, 1], [30000, 1001], [30, 1], [12, 1]]
     .find(([num, den]) => Math.abs(num / den - selected) < 0.001);
   const [fpsNumerator, fpsDenominator] = canonical ?? [Math.round(selected * 1_000_000), 1_000_000];
-  const fps = fpsNumerator / fpsDenominator, frames = Math.max(1, Math.ceil(duration * fps - 1e-9));
+  const fps = fpsNumerator / fpsDenominator, frames = Math.max(1, frameCount(duration, fps));
   const conversions = ["AVC video and 44.1 kHz stereo AAC; square pixels; browser-managed SDR sRGB conversion"];
   if (actual.some(rate => rate > 30.001 || Math.abs(rate - fps) > 0.001)) conversions.push(`Source frame rates are sampled onto ${fpsNumerator}/${fpsDenominator} CFR`);
   if (assets.some(asset => asset.video?.variableFrameRate)) conversions.push("Variable-rate sources are sampled onto a constant output grid");

@@ -4,6 +4,28 @@ import { expression } from "../source-probes.mjs";
 import { openEditor, loadDraft, saveDraft } from "./helpers.mjs";
 import { asset, draft, openProbe } from "./fixtures.mjs";
 
+test("video samples with alpha are composited against the black output matte",async({context},info)=>{
+  const page=await openProbe(context),clip=await asset("silent-video.mp4",{duration:.1,hasAudio:false});
+  const pixel=await page.evaluate(async clip=>{
+    const m=window.testRuntime.media,{createRenderer}=await import("/services/renderSegment.ts");
+    const blob=new Blob([Uint8Array.from(atob(clip.base64),c=>c.charCodeAt(0))],{type:clip.mimeType});
+    const rgba=new Uint8Array(160*90*4);for(let i=0;i<rgba.length;i+=4){rgba[i]=255;rgba[i+3]=64}
+    const original=m.VideoSampleSink.prototype.samplesAtTimestamps;
+    m.VideoSampleSink.prototype.samplesAtTimestamps=async function*(times){for await(const time of times)yield new m.VideoSample(rgba,{format:"RGBA",codedWidth:160,codedHeight:90,timestamp:time,duration:1/30})};
+    let bytes;
+    try{bytes=await createRenderer([{...clip,sourceId:"source"}],{targetWidth:160,targetHeight:90,videoBitrate:1000000,fps:30,frameDuration:1/30,fitMode:"contain"},async()=>blob,()=>{},()=>{})(0,.1,0)}
+    finally{m.VideoSampleSink.prototype.samplesAtTimestamps=original}
+    const input=new m.Input({source:new m.BlobSource(new Blob([bytes])),formats:m.ALL_FORMATS});
+    try{
+      const sink=new m.VideoSampleSink(await input.getPrimaryVideoTrack()),sample=await sink.getSample(.033);
+      const canvas=new OffscreenCanvas(160,90),ctx=canvas.getContext("2d");sample.draw(ctx,0,0,160,90);sample.close();
+      return [...ctx.getImageData(80,45,1,1).data];
+    }finally{input.dispose()}
+  },clip);
+  await info.attach("alpha-matte-pixel",{body:JSON.stringify(pixel),contentType:"application/json"});
+  expect(pixel[0]).toBeGreaterThan(45);expect(pixel[0]).toBeLessThan(90);expect(pixel[1]).toBeLessThan(15);expect(pixel[2]).toBeLessThan(15);
+});
+
 test("rejected malformed draft preserves the current source URL", async ({
   page,
 }, info) => {

@@ -1,5 +1,47 @@
 import { test, expect } from "./harness.mjs";
-import { asset, openProbe } from "./fixtures.mjs";
+import { asset, draft, openProbe } from "./fixtures.mjs";
+import { openEditor, loadDraft } from "./helpers.mjs";
+
+test("short trim offsets and explicit small seeks synchronize both preview owners",async({page},info)=>{
+  await page.addInitScript(()=>{
+    window.previewSeeks=[];const time=Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype,"currentTime");
+    Object.defineProperty(HTMLMediaElement.prototype,"currentTime",{configurable:true,get:time.get,set(value){window.previewSeeks.push({kind:this.tagName,value});return time.set.call(this,value)}});
+  });
+  await openEditor(page);await loadDraft(page,draft([await asset("bars-fractional-av.mp4",{duration:.9,trimStart:.05,trimEnd:.05})]));
+  await page.locator("video").first().evaluate(video=>video.readyState>=1?undefined:new Promise(resolve=>video.addEventListener("loadedmetadata",resolve,{once:true})));
+  await page.evaluate(()=>{window.previewSeeks=[]});
+  await page.getByRole("button",{name:"Play preview",exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.previewSeeks.some(point=>point.kind==="AUDIO"&&Math.abs(point.value-.05)<1e-6))).toBe(true);
+  await page.evaluate(()=>{window.previewSeeks=[]});
+  await page.getByRole("slider",{name:"Playhead time",exact:true}).evaluate(input=>{
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set.call(input,"0.02");input.dispatchEvent(new Event("input",{bubbles:true}));
+  });
+  for(const kind of ["AUDIO","VIDEO"])await expect.poll(()=>page.evaluate(kind=>window.previewSeeks.some(point=>point.kind===kind&&Math.abs(point.value-.07)<1e-6),kind)).toBe(true);
+  await page.getByRole("button",{name:"Pause preview",exact:true}).click();
+  const requested=await page.getByRole("slider",{name:"Playhead time",exact:true}).evaluate(input=>{
+    const value=Math.min(.8,Number(input.value)+.01);window.previewSeeks=[];
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set.call(input,String(value));input.dispatchEvent(new Event("input",{bubbles:true}));return value+.05;
+  });
+  for(const kind of ["AUDIO","VIDEO"])await expect.poll(()=>page.evaluate(({kind,requested})=>window.previewSeeks.some(point=>point.kind===kind&&Math.abs(point.value-requested)<1e-6),{kind,requested})).toBe(true);
+  await info.attach("explicit-preview-seeks",{body:JSON.stringify(await page.evaluate(()=>window.previewSeeks)),contentType:"application/json"});
+});
+
+test("preview audio does not restart an exhausted source inside a longer declared interval",async({context})=>{
+  const page=await openProbe(context),source=await asset("bars-fractional-av.mp4");
+  const result=await page.evaluate(async source=>{
+    const {React,createRoot,AudioEngine}=window.testRuntime,NativeAudio=window.Audio;let audio,calls=0;
+    window.Audio=function(...args){audio=new NativeAudio(...args);const play=audio.play.bind(audio);audio.play=()=>{calls++;return play()};return audio};window.Audio.prototype=NativeAudio.prototype;
+    const url=URL.createObjectURL(new Blob([Uint8Array.from(atob(source.base64),c=>c.charCodeAt(0))],{type:source.mimeType}));
+    const host=document.createElement("div");document.body.append(host);const root=createRoot(host);
+    const props={mediaAssets:[],audioTracks:[{id:"track",sourceId:"source",duration:2,startTime:0}],sourceUrl:()=>url,currentTime:0,isPlaying:false};
+    const render=async changes=>{Object.assign(props,changes);root.render(React.createElement(AudioEngine,props));await new Promise(resolve=>setTimeout(resolve,50))};
+    try{
+      await render({});if(audio.readyState<1)await new Promise(resolve=>audio.addEventListener("loadedmetadata",resolve,{once:true}));
+      await render({currentTime:1.2,isPlaying:true,seekRevision:1});return {calls,paused:audio.paused};
+    }finally{root.unmount();host.remove();URL.revokeObjectURL(url);window.Audio=NativeAudio}
+  },source);
+  expect(result).toEqual({calls:0,paused:true});
+});
 
 test("audio engine retries, rebinds and releases every playback lifecycle", async ({
   context,

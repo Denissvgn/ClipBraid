@@ -55,13 +55,13 @@ async function installMediaFaults(page) {
       }
       return digest(...args);
     };
-    const text = Blob.prototype.text;
-    Blob.prototype.text = function (...args) {
+    const readText = FileReader.prototype.readAsText;
+    FileReader.prototype.readAsText = function (...args) {
       if (state.failFileRead) {
         state.failFileRead = false;
-        return Promise.reject(new Error("injected project file read failure"));
+        setTimeout(() => this.dispatchEvent(new Event("error")), 0); return;
       }
-      return text.apply(this, args);
+      return readText.apply(this, args);
     };
     const src = Object.getOwnPropertyDescriptor(
       HTMLMediaElement.prototype,
@@ -394,4 +394,60 @@ test("a failed save reports an error, releases leases, and permits a healthy ret
       }
     }, oldUrl),
   ).toBe(false);
+});
+
+test("a newer project cancels an older native file read and keeps its data and filename",async({page})=>{
+  await page.addInitScript(()=>{
+    window.abortedProjectReaders=0;const read=FileReader.prototype.readAsText,abort=FileReader.prototype.abort;
+    FileReader.prototype.readAsText=function(file,...args){
+      if(file.name==="slow.json"){
+        this.isDelayedProject=true;
+        window.releaseProjectRead=()=>new Promise(resolve=>{this.addEventListener("loadend",resolve,{once:true});read.call(this,file,...args)});
+      }else read.call(this,file,...args);
+    };
+    FileReader.prototype.abort=function(){if(this.isDelayedProject)window.abortedProjectReaders++;return abort.call(this)};
+  });
+  await openEditor(page);
+  const old=draft([await asset("landscape-red.png",{name:"Older project"})]),next=draft([await asset("portrait-blue.png",{name:"Newer project"})]);
+  await page.locator('input[accept=".json"]').setInputFiles({name:"slow.json",mimeType:"application/json",buffer:Buffer.from(JSON.stringify(old))});
+  await page.waitForFunction(()=>window.releaseProjectRead);
+  await page.locator('input[accept=".json"]').setInputFiles({name:"newer.json",mimeType:"application/json",buffer:Buffer.from(JSON.stringify(next))});
+  await expect(page.getByRole("button",{name:"Edit Newer project",exact:true})).toBeVisible();
+  await page.evaluate(()=>window.releaseProjectRead());await page.evaluate(()=>window.__clipbraidE2E.projectWorkIdle());
+  expect(await page.evaluate(()=>window.abortedProjectReaders)).toBe(1);
+  const downloaded=page.waitForEvent("download"),saved=await saveDraft(page);
+  expect((await downloaded).suggestedFilename()).toBe("newer.json");expect(saved.mediaAssets[0].name).toBe("Newer project");
+});
+
+test("a project staged late cannot replace a newer commit or leak its original",async({page})=>{
+  await page.addInitScript(()=>{
+    const digest=crypto.subtle.digest.bind(crypto.subtle);
+    crypto.subtle.digest=(...args)=>{
+      if(window.holdProjectHash){window.holdProjectHash=false;return new Promise(resolve=>{window.releaseProjectHash=()=>digest(...args).then(resolve)})}
+      return digest(...args);
+    };
+  });
+  await openEditor(page);
+  const old=draft([await asset("landscape-red.png",{name:"Older staged project"})]),next=draft([await asset("portrait-blue.png",{name:"Newer committed project"})]);
+  await page.evaluate(text=>{window.holdProjectHash=true;window.olderProject=window.__clipbraidE2E.loadText(text,"older.json")},JSON.stringify(old));
+  await page.waitForFunction(()=>window.releaseProjectHash);
+  expect(await page.evaluate(text=>window.__clipbraidE2E.loadText(text,"newer.json"),JSON.stringify(next))).toBe(true);
+  await page.evaluate(()=>window.releaseProjectHash());expect(await page.evaluate(()=>window.olderProject)).toBe(false);
+  await page.evaluate(()=>window.__clipbraidE2E.projectWorkIdle());
+  expect(await page.evaluate(()=>window.__clipbraidE2E.mediaInventory().sources.length)).toBe(1);
+  await expect(page.getByRole("button",{name:"Edit Newer committed project",exact:true})).toBeVisible();
+  const downloaded=page.waitForEvent("download"),saved=await saveDraft(page);
+  expect((await downloaded).suggestedFilename()).toBe("newer.json");expect(saved.mediaAssets[0].base64).toBe(next.mediaAssets[0].base64);
+});
+
+test("pending gallery imports belong to the project that requested them",async({page})=>{
+  await openEditor(page);await loadDraft(page,draft([await asset("landscape-red.png")]));
+  const late=await asset("portrait-blue.png",{name:"Late gallery item"});
+  await page.evaluate(()=>{window.Flow={media:{select:()=>new Promise(resolve=>{window.deliverOldSelection=resolve})}}});
+  await page.getByRole("button",{name:"Add visuals",exact:true}).click();await page.waitForFunction(()=>window.deliverOldSelection);
+  await loadDraft(page,draft([await asset("portrait-blue.png",{name:"Replacement project"})]));
+  await page.evaluate(late=>window.deliverOldSelection(late),late);await page.evaluate(()=>window.__clipbraidE2E.projectWorkIdle());
+  await page.evaluate(()=>{delete window.Flow});
+  const saved=await saveDraft(page);expect(saved.mediaAssets.map(asset=>asset.name)).toEqual(["Replacement project"]);
+  expect(await page.evaluate(()=>window.__clipbraidE2E.mediaInventory().sources.length)).toBe(1);
 });

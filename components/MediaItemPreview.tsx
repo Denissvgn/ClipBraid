@@ -14,6 +14,7 @@ interface MediaItemPreviewProps {
   fitMode: "contain" | "cover";
   opacity: number;
   zIndex: number;
+  seekRevision?: number;
 }
 export const MediaItemPreview = memo(
   ({
@@ -24,8 +25,11 @@ export const MediaItemPreview = memo(
     fitMode,
     opacity,
     zIndex,
+    seekRevision = 0,
   }: MediaItemPreviewProps) => {
     const videoRef = useRef<HTMLVideoElement>(null);
+    const previousSeek = useRef(seekRevision);
+    const previousPlacement = useRef({ start: asset.startTime, trim: asset.trimStart });
 
     const localTime = sourceTimeAt(asset, currentTime);
     const isVisible = intervalsOverlap(
@@ -36,10 +40,14 @@ export const MediaItemPreview = memo(
     useEffect(() => {
       if (asset.type !== "video" || !videoRef.current) return;
       const video = videoRef.current;
+      const seeked = previousSeek.current !== seekRevision;
+      previousSeek.current = seekRevision;
+      const moved = previousPlacement.current.start !== asset.startTime || previousPlacement.current.trim !== asset.trimStart;
+      previousPlacement.current = { start: asset.startTime, trim: asset.trimStart };
       const isActive = isIntervalActive(asset, currentTime);
       if (isActive) {
         if (isPlaying) {
-          if (Math.abs(video.currentTime - localTime) > 0.3) {
+          if (video.paused || seeked || moved || Math.abs(video.currentTime - localTime) > 0.3) {
             video.currentTime = localTime;
           }
           if (video.paused) {
@@ -47,7 +55,7 @@ export const MediaItemPreview = memo(
           }
         } else {
           if (!video.paused) video.pause();
-          if (Math.abs(video.currentTime - localTime) > 0.05) {
+          if (Math.abs(video.currentTime - localTime) > 1e-6) {
             video.currentTime = localTime;
           }
         }
@@ -63,6 +71,8 @@ export const MediaItemPreview = memo(
       asset.startTime,
       asset.duration,
       asset.type,
+      url,
+      seekRevision,
     ]);
     const getFilterStyle = (filter: VisualFilter): string => {
       switch (filter) {

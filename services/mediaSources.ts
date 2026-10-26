@@ -8,7 +8,7 @@
  * edits. Optional derived media (proxies, future renders) hang off a source
  * under a settings key and are dropped with it; originals stay authoritative.
  *
- * Every object URL in the application is created and revoked through this
+ * Every runtime source/derived-media URL is created and revoked through this
  * module. Consumers hold explicit references — `acquire` leases for running
  * jobs and `syncPins` for the live project — and a URL is revoked only when
  * its last reference is gone. Deleting or replacing a project therefore can
@@ -83,6 +83,7 @@ export class MediaSourceStore {
   private entries = new Map<string, Entry>();
   private pinned = new Set<string>();
   private counter = 0;
+  private generation = 0;
   private readonly urlApi: UrlApi;
 
   constructor(urlApi: UrlApi = defaultUrlApi) {
@@ -98,6 +99,7 @@ export class MediaSourceStore {
   async stage(
     items: { bytes: Blob; mimeType: string }[],
   ): Promise<SourceAsset[]> {
+    const generation = this.generation;
     const stagedIds: string[] = [];
     const byChecksum = new Map<string, SourceAsset>();
     try {
@@ -106,6 +108,7 @@ export class MediaSourceStore {
         if (!item.bytes || item.bytes.size === 0)
           throw new Error("Empty media data.");
         const sha256 = await sourceChecksum(item.bytes);
+        if (generation !== this.generation) throw new Error("Media store changed during staging.");
         const shared = byChecksum.get(sha256);
         if (shared) {
           out.push(shared);
@@ -197,6 +200,10 @@ export class MediaSourceStore {
       stage: async (items) => {
         if (settled) throw new Error("Source transaction already settled.");
         const assets = await this.stage(items);
+        if (settled) {
+          for (const asset of assets) if (!this.pinned.has(asset.sourceId)) this.remove(asset.sourceId);
+          throw new Error("Source transaction already settled.");
+        }
         for (const asset of assets) staged.add(asset.sourceId);
         return assets;
       },
@@ -270,8 +277,18 @@ export class MediaSourceStore {
    */
   syncPins(sourceIds: Iterable<string>): void {
     const target = new Set(sourceIds);
-    for (const sourceId of target)
-      if (!this.pinned.has(sourceId)) this.pin(sourceId);
+    const acquired: string[] = [];
+    try {
+      for (const sourceId of target) if (!this.pinned.has(sourceId)) {
+        this.pin(sourceId); acquired.push(sourceId);
+      }
+    } catch (error) {
+      for (const sourceId of acquired) {
+        this.pinned.delete(sourceId);
+        this.release(this.entries.get(sourceId)!, "failed-pin-sync");
+      }
+      throw error;
+    }
     for (const sourceId of [...this.pinned])
       if (!target.has(sourceId)) {
         this.pinned.delete(sourceId);
@@ -297,6 +314,7 @@ export class MediaSourceStore {
 
   /** Dispose everything (project teardown); open leases still defer purge. */
   clear(): void {
+    this.generation++;
     for (const sourceId of [...this.entries.keys()]) this.remove(sourceId);
     this.pinned.clear();
   }

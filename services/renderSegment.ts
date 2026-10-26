@@ -147,6 +147,9 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
               src.displayHeight === targetHeight &&
               src.rotation === 0 &&
               !src.flip &&
+              // AVC discards alpha instead of applying our matte. Unknown or
+              // alpha-bearing formats must use the cleared canvas path.
+              ["I420", "I422", "I444", "NV12", "RGBX", "BGRX", "I420P10", "I422P10", "I444P10"].includes(src.format ?? "") &&
               par?.num === 1 &&
               par?.den === 1
             ) {

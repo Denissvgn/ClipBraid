@@ -9,6 +9,7 @@ interface AudioEngineProps {
   sourceUrl: (sourceId: string) => string | undefined;
   currentTime: number;
   isPlaying: boolean;
+  seekRevision?: number;
 }
 
 const releaseAudio = (audio: HTMLAudioElement) => {
@@ -24,8 +25,11 @@ export const AudioEngine = memo(
     sourceUrl,
     currentTime = 0,
     isPlaying = false,
+    seekRevision = 0,
   }: AudioEngineProps) => {
     const audioRefs = useRef<Map<string, HTMLAudioElement>>(new Map());
+    const previousSeek = useRef(seekRevision);
+    const previousMapping = useRef(new Map<string, { start: number; source: number }>());
     const policy = useMemo(() => mixPolicy(mediaAssets, audioTracks), [mediaAssets, audioTracks]);
     useEffect(() => {
       // Collect IDs for current audio requirements
@@ -81,28 +85,32 @@ export const AudioEngine = memo(
       [],
     );
     useEffect(() => {
+      const seeked = previousSeek.current !== seekRevision;
+      previousSeek.current = seekRevision;
+      const nextMapping = new Map<string, { start: number; source: number }>();
+      const sync = (id: string, audio: HTMLAudioElement, active: boolean, target: number, start: number, source = 0) => {
+        const before = previousMapping.current.get(id);
+        const moved = !before || before.start !== start || before.source !== source;
+        nextMapping.set(id, { start, source });
+        const ended = (Number.isFinite(audio.duration) && target >= audio.duration)
+          || (audio.ended && target >= audio.currentTime - 1e-6);
+        if (!active || !isPlaying || ended) {
+          if (!audio.paused) audio.pause();
+          if (active && !ended && Math.abs(audio.currentTime - target) > 1e-6) audio.currentTime = target;
+          return;
+        }
+        // Drift tolerance applies only during continuous playback. A new
+        // source/start or explicit seek must honor even a very short trim.
+        if (audio.paused || seeked || moved || Math.abs(audio.currentTime - target) > 0.35) audio.currentTime = target;
+        if (audio.paused) audio.play().catch(() => {});
+      };
       // Sync soundtracks
       audioTracks.forEach((track) => {
         const audio = audioRefs.current.get(track.id);
         if (!audio) return;
         audio.volume = trackGain(track) * policy.gain;
         const isWithinRange = isIntervalActive(track, currentTime);
-        if (isPlaying && isWithinRange) {
-          const targetTime = currentTime - track.startTime;
-          if (Math.abs(audio.currentTime - targetTime) > 0.35)
-            audio.currentTime = targetTime;
-          if (audio.paused) audio.play().catch(() => {});
-        } else {
-          if (!audio.paused) audio.pause();
-          if (isWithinRange) {
-            if (
-              Math.abs(audio.currentTime - (currentTime - track.startTime)) >
-              0.05
-            ) {
-              audio.currentTime = currentTime - track.startTime;
-            }
-          }
-        }
+        sync(track.id, audio, isWithinRange, currentTime - track.startTime, track.startTime);
       });
       // Sync video clip audio
       mediaAssets.forEach((asset) => {
@@ -112,21 +120,10 @@ export const AudioEngine = memo(
         audio.volume = trackGain(asset) * policy.gain;
         const isWithinRange = isIntervalActive(asset, currentTime);
         const targetTime = sourceTimeAt(asset, currentTime);
-        if (isPlaying && isWithinRange) {
-          if (Math.abs(audio.currentTime - targetTime) > 0.35)
-            audio.currentTime = targetTime;
-          if (audio.paused) audio.play().catch(() => {});
-        } else {
-          if (!audio.paused) audio.pause();
-          if (
-            isWithinRange &&
-            Math.abs(audio.currentTime - targetTime) > 0.05
-          ) {
-            audio.currentTime = targetTime;
-          }
-        }
+        sync(asset.id, audio, isWithinRange, targetTime, asset.startTime, asset.trimStart);
       });
-    }, [isPlaying, currentTime, audioTracks, mediaAssets, sourceUrl, policy.gain]);
+      previousMapping.current = nextMapping;
+    }, [isPlaying, currentTime, audioTracks, mediaAssets, sourceUrl, policy.gain, seekRevision]);
     return null;
   },
 );
