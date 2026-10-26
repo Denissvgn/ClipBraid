@@ -25,3 +25,16 @@ test("host cancellation, unknown acknowledgement and acceptance remain distinct"
     if(type==="host-accepted")await expect(page.locator('[data-delivery-outcome="host-accepted"]')).toBeVisible();
   }
 });
+
+test("a host transport exception preserves uncertainty after invocation",async({page})=>{
+  await page.addInitScript(()=>{window.Flow={save:async()=>{throw new Error("connection lost after host received bytes")}}});
+  await openEditor(page);await loadDraft(page,draft([await asset("landscape-red.png")]));
+  await page.getByRole("button",{name:"draft",exact:true}).click();
+  await page.getByRole("button",{name:"Export video",exact:true}).click();
+  await expect(page.locator(".export-message")).toContainText("Check your downloads or host files");
+  const report=await page.locator("#export-diagnostic-report").evaluate(el=>JSON.parse(el.textContent));
+  expect(report.outcome).toBe("unknown");
+  expect(report.warnings).toContain("delivery-uncertain");
+  expect(report.events.some(event=>event.type==="unknown")).toBe(true);
+  expect(report.events.some(event=>event.type==="host-accepted")).toBe(false);
+});

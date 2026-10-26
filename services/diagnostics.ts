@@ -46,11 +46,11 @@ export function createJobReport(state: ExportState): JobReport | null {
   const render = state.phaseResults?.find(result => result.phase === "rendering");
   return sanitizeReport({ schemaVersion: 1, jobId: state.jobId, buildId: state.buildId, startedAt: state.startedAt,
     updatedAt: state.updatedAt, endedAt: state.endedAt, phase: state.phase, progress: state.progress,
-    outcome: state.active ? "running" : state.phase === "failed" ? "failed" : state.phase === "cancelled" ? "cancelled" : state.result?.delivery ?? "unknown",
+    outcome: state.active ? "running" : state.phase === "failed" ? (state.cleanupComplete && !state.result && state.failure?.deliveryMayHaveStarted ? "unknown" : "failed") : state.phase === "cancelled" ? "cancelled" : state.result?.delivery ?? "unknown",
     category: state.failure?.category, cleanupComplete: state.cleanupComplete, input: state.input,
     profile: profile && "profile" in profile ? profile.profile : null, timingsMs: state.phaseTimingsMs,
     warnings: [profile ? "profile-conversion" : null, !state.cleanupComplete && !state.active ? "cleanup-incomplete" : null,
-      state.failure?.deliveryMayHaveStarted ? "delivery-uncertain" : null, state.result ? "device-storage-unconfirmed" : null,
+      state.failure?.deliveryMayHaveStarted && !state.result ? "delivery-uncertain" : null, state.result ? "device-storage-unconfirmed" : null,
       render && "attempts" in render && (render.attempts ?? 0) > 1 ? "single-encoder-retry" : null],
     events: state.events, resources: state.diagnostics });
 }

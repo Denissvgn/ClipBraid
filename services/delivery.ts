@@ -1,4 +1,5 @@
 import { Flow, isHostedFlow } from "../platform";
+import { saveReceipt } from "./saveReceipt";
 export type DeliveryOutcome = "download-started" | "host-accepted";
 export type DeliveryCategory = "rejected" | "cancelled" | "denied" | "unsupported" | "transport" | "unknown" | "size-limit";
 export const MAX_VIDEO_BYTES = 96 * 1024 * 1024;
@@ -8,7 +9,9 @@ export class DeliveryError extends Error {
     super(message); this.name = category === "cancelled" ? "AbortError" : "DeliveryError";
   }
 }
-export function deliveryFailure(error: unknown): DeliveryError {
+export function deliveryFailure(error: unknown, unobservedHandoff = false): DeliveryError {
+  if (unobservedHandoff && (error as { name?: string })?.name === "AbortError")
+    return new DeliveryError("The save handoff is no longer observed; a save may have started.", "unknown", true);
   if (error instanceof DeliveryError) return error;
   const name = (error as { name?: string })?.name;
   const advertised = (error as { category?: DeliveryCategory })?.category;
@@ -38,14 +41,6 @@ export async function deliverVideo(payload: { base64: string; mimeType: string; 
     payload.signal?.throwIfAborted();
     assertVideoSize(Math.floor(payload.base64.length * 3 / 4) - (payload.base64.endsWith("==") ? 2 : payload.base64.endsWith("=") ? 1 : 0), payload.base64.length);
     const response = await Flow.save(payload);
-    if (response === false) throw new DeliveryError("Save adapter rejected the video.", "rejected");
-    if (response === true) return { outcome: isHostedFlow() ? "host-accepted" : "download-started" };
-    if (response && typeof response === "object") {
-      const value = response as { accepted?: unknown; cancelled?: unknown; outcome?: unknown };
-      if (value.cancelled === true || value.outcome === "cancelled") throw new DeliveryError("Save was cancelled.", "cancelled");
-      if (value.accepted === true || value.outcome === "host-accepted") return { outcome: "host-accepted" };
-      if (value.outcome === "download-started") return { outcome: "download-started" };
-    }
-    throw new DeliveryError("The save adapter did not acknowledge delivery; a save may have started.", "unknown", true);
+    return saveReceipt(response, isHostedFlow());
   } catch (error) { throw deliveryFailure(error); }
 }

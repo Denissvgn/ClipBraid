@@ -8,9 +8,10 @@ export function exportStage(state: Pick<ExportState, "phase" | "cancellable">): 
     failed: "Couldn’t export this video" })[state.phase];
 }
 
-export function exportRecovery(state: Pick<ExportState, "failure" | "cleanupComplete">) {
+export function exportRecovery(state: Pick<ExportState, "failure" | "cleanupComplete"> & Partial<Pick<ExportState, "result">>) {
   const category = state.failure?.category;
   if (!state.cleanupComplete) return { retry: false, message: "Media cleanup has not finished. Save your project, then reload this page before another export." };
+  if (state.result) return { retry: false, message: "The video handoff was confirmed before a later step failed. Check your downloads or host files before exporting again; avoid creating a duplicate." };
   if (category === "asset") return { retry: false, message: "Check this clip’s trim and original file. Relink or replace it; convert unsupported media to a format this browser can decode. All clips must pass the media check." };
   if (category === "size-limit") return { retry: false, message: "The video exceeds the delivery limit. Choose Draft or shorten the timeline, then export again." };
   if (category === "unsupported") return { retry: false, message: "This browser or host does not support the requested export or save action. Save your project and open it in a supported Chromium browser." };

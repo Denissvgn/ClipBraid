@@ -7,9 +7,9 @@ import { assessPlaywright } from './qualification-policy.mjs';
 
 // One gate at a time, with private evidence even when a child fails or times out.
 const gates = [['check:toolchain',30000], ['typecheck',60000], ['check:mcp',60000], ['test:unit',120000],
-  ['build',120000], ['check:build-isolation',120000], ['check:style-isolation',120000], ['check:artifacts',30000], ['test:browser',970000], ['test:production',120000]];
+  ['build',120000], ['check:build-isolation',120000], ['check:style-isolation',120000], ['check:artifacts',30000], ['test:diagnostic',60000], ['test:browser',970000], ['test:production',120000]];
 const directory = 'reports/qualification'; mkdirSync(directory,{recursive:true});
-const reportFiles=['reports/toolchain.json','reports/build-artifacts.json','reports/build-isolation.json','reports/style-isolation.json','reports/browser-manifest.json','reports/browser-results.json','reports/production-results.json'];
+const reportFiles=['reports/toolchain.json','reports/build-artifacts.json','reports/build-isolation.json','reports/style-isolation.json','reports/diagnostic-cli-test.json','reports/browser-manifest.json','reports/browser-results.json','reports/production-results.json'];
 for(const file of reportFiles)rmSync(file,{force:true}); // A stopped gate must not inherit a previous run's evidence.
 const initial = sourceIdentity(), sha = value => createHash('sha256').update(value).digest('hex');
 const manifest = {schemaVersion:1,status:'running',startedAt:new Date().toISOString(),

@@ -8,6 +8,8 @@ test("export stages describe actual processing and recovery does not permit unsa
   assert.equal(exportRecovery({ cleanupComplete: false }).retry, false);
   for (const category of ["asset", "size-limit", "unsupported"]) assert.equal(exportRecovery({ cleanupComplete: true, failure: { category } }).retry, false);
   assert.match(exportRecovery({ cleanupComplete: true, failure: { deliveryMayHaveStarted: true } }).message, /Check your downloads/);
+  const confirmed=exportRecovery({cleanupComplete:true,failure:{category:"processing",deliveryMayHaveStarted:true},result:{delivery:"host-accepted",videoBytes:100}});
+  assert.equal(confirmed.retry,false);assert.match(confirmed.message,/handoff was confirmed/);
   for (const category of ["denied", "cancelled", "transport", "unknown", "unsupported", "rejected", "size-limit"]) assert.ok(mediaRecovery(category).length > 30);
 });
 test("copyable job details omit raw messages, names and event payloads", () => {

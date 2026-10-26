@@ -57,3 +57,9 @@ export function loadModule(file, imports = {}) {
   });
   return exports;
 }
+
+export function loadDelivery(platform) {
+  const errors = loadModule("services/platformError.ts");
+  const receipts = loadModule("services/saveReceipt.ts", { "./platformError": errors });
+  return loadModule("services/delivery.ts", { "../platform": platform, "./saveReceipt": receipts });
+}

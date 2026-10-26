@@ -175,6 +175,7 @@ export class ExportJobs {
     const leases: SourceLease[] = [];
     const blobs = new Map<string, Blob>();
     const diagnostics: Record<string, unknown>[] = [];
+    let observedReceipt: ExportResult | null = null;
     let diagnosticTimer: ReturnType<typeof setTimeout> | undefined;
     let abortCleanupTimer: ReturnType<typeof setTimeout> | undefined;
     resources.signal.addEventListener("abort", () => {
@@ -215,6 +216,8 @@ export class ExportJobs {
       beginDelivery: () => { context.event("delivery-started"); update({ cancellable: false }); },
       event: (type, detail = {}) => {
         if (this.state.jobId !== jobId || !this.state.active) return;
+        if ((type === "download-started" || type === "host-accepted") && Number.isSafeInteger(detail.bytes) && Number(detail.bytes) > 0)
+          observedReceipt = { delivery: type, videoBytes: Number(detail.bytes) };
         const event: ExportEvent = { schemaVersion: 1, jobId, buildId: this.buildId, type, at: new Date().toISOString(),
           elapsedMs: Math.floor(performance.now() - started), detail };
         update({ events: [...this.state.events.slice(-79), event],
@@ -287,8 +290,9 @@ export class ExportJobs {
       } catch (cause) {
         error = String(cause);
         const detail = cause as { category?: string; assetId?: string; deliveryMayHaveStarted?: boolean; name?: string } | null;
-        update({ failure: { category: detail?.category ?? (detail?.name === "AbortError" ? "cancelled" : "processing"),
-          assetId: detail?.assetId, deliveryMayHaveStarted: detail?.deliveryMayHaveStarted } });
+        const lostHandoff = resources.signal.aborted && !observedReceipt && this.state.events.some(event => event.type === "delivery-started");
+        update({ failure: { category: lostHandoff ? "unknown" : detail?.category ?? (detail?.name === "AbortError" && !observedReceipt ? "cancelled" : "processing"),
+          assetId: detail?.assetId, deliveryMayHaveStarted: !!observedReceipt || lostHandoff || detail?.deliveryMayHaveStarted } });
         resources.abort(cause);
         context.addLog(`EXPORT STOPPED: ${error}`);
       } finally {
@@ -305,18 +309,23 @@ export class ExportJobs {
             timer = setTimeout(() => reject(new Error("Export cleanup did not finish; reload before another export.")), this.deadlines.cleanupMs ?? 5000);
             resources.close().then(resolve, reject);
           });
-        } catch (cause) { cleanupComplete = false; error = String(cause); }
+        } catch (cause) {
+          cleanupComplete = false; error = String(cause);
+        }
         finally { clearTimeout(timer); }
         for (const lease of leases) {
           try { lease.release(); }
           catch (cause) { cleanupComplete = false; error = `Source cleanup failed: ${String(cause)}`; }
         }
+        if (!cleanupComplete) this.publish({ failure: { ...this.state.failure, category: "cleanup" } });
         blobs.clear();
         this.running = null;
         this.resources = null;
-        const cancelled = resources.signal.aborted && resources.signal.reason?.name === "AbortError";
-        if (error) context.event(cancelled ? "cancelled" : "failed", { message: error,
-          category: (resources.signal.reason as { category?: string })?.category ?? "processing", cleanupComplete });
+        result ??= observedReceipt;
+        const cancelled = resources.signal.aborted && resources.signal.reason?.name === "AbortError" && !this.state.failure?.deliveryMayHaveStarted;
+        const unknown = cleanupComplete && !result && this.state.failure?.deliveryMayHaveStarted;
+        if (error) context.event(unknown ? "unknown" : cancelled ? "cancelled" : "failed", { message: error,
+          category: this.state.failure?.category ?? "processing", cleanupComplete });
         this.publish({ active: false, phase: error ? (cancelled && cleanupComplete ? "cancelled" : "failed") : "complete", error, result,
           progress: error ? this.state.progress : 100, cleanupComplete, cancellable: false, endedAt: new Date().toISOString() });
         finish();

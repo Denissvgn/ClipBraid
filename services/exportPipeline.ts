@@ -6,6 +6,7 @@ import { preflightAssets } from "./preflight";
 import { decodeAudioInWorker } from "./audioWorker";
 import { ExportResources } from "./exportJob";
 import { clipHasSound, mixPolicy, trackGain } from "./mixing";
+import { resolveSourceAudio } from "./sourceAudio";
 import { Flow } from "../platform";
 import { ffmpegService } from "./ffmpegService";
 import { scheduleAudioChunk, combineAudioChunks, type AudioSelection } from "./audio";
@@ -74,13 +75,14 @@ const audioBufferToWav = (buffer: AudioBuffer): Uint8Array<ArrayBuffer> => {
   return bytes;
 };
 export async function runExportPipeline(snapshot: ExportSnapshot, context: ExportContext): Promise<ExportResult> {
-  const { mediaAssets, audioTracks, aspectRatio, fitMode, exportQuality, totalDuration } = snapshot;
   const { getBlob, addLog, setExportProgress, phase, report } = context;
   const segmentProgress = { current: [0, 0] };
   const resources = context.resources;
   const releaseFFmpeg = resources.own(() => ffmpegService.terminate());
   try {
     const inventory = await preflightAssets(snapshot, context);
+    const checked = resolveSourceAudio(snapshot, inventory);
+    const { mediaAssets, audioTracks, aspectRatio, fitMode, exportQuality, totalDuration } = checked;
     report({ phase: "preparing", assets: inventory });
     await resources.wait(ffmpegService.load(addLog), releaseFFmpeg);
     await initMediaCodecs();
@@ -176,7 +178,7 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
     };
     // A failed branch cancels its siblings; settle their cleanup before a retry.
     const results = await Promise.allSettled([
-      run(() => renderVisualPlan(snapshot, profile, context)),
+      run(() => renderVisualPlan(checked, profile, context)),
       run(() => mixAudio(cancellation.signal, resources, addLog)),
     ]);
     const visual = results[0]; if (visual.status === "rejected") throw visual.reason;
@@ -233,7 +235,7 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
     phase("saving");
     assertVideoSize(masterBytes.byteLength);
     const b64 = await blobToBase64(
-      new Blob([masterBytes.buffer as ArrayBuffer], { type: "video/mp4" }), resources.signal,
+      new Blob([masterBytes as Uint8Array<ArrayBuffer>], { type: "video/mp4" }), resources.signal,
     );
 
     setExportProgress(95);
@@ -258,7 +260,7 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
       report({ phase: "saving", accepted: true });
       return { videoBytes: masterBytes.byteLength, delivery: receipt.outcome };
     } catch (e) {
-      const error = deliveryFailure(e);
+      const error = deliveryFailure(e, resources.signal.aborted && e === resources.signal.reason);
       context.event(error.category === "cancelled" ? "cancelled" : error.deliveryMayHaveStarted ? "unknown" : "failed",
         { category: error.category, message: error.message, deliveryMayHaveStarted: error.deliveryMayHaveStarted });
       throw error;

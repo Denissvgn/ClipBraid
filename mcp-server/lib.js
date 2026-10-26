@@ -73,7 +73,7 @@ export function exportStatus(logText, { mtimeMs = null, nowMs = Date.now(), maxI
   const current = events.filter(event => event.jobId === jobId && event.buildId === buildId);
   const runLines = lines.slice(boundary).map(line => line.replace(prefix, ""));
   const rawFailure = runLines.some(line => /^(Master Export Failed|EXPORT FAILED|EXPORT STOPPED|Export failed|Save rejected)\b/i.test(line));
-  const heartbeatMs = Math.max(...current.map(event => Date.parse(event.at)).filter(Number.isFinite), mtimeMs ?? 0) || null;
+  const heartbeatMs = Math.max(...current.map(event => Date.parse(event.at)).filter(Number.isFinite), current.length ? 0 : mtimeMs ?? 0) || null;
   const stale = heartbeatMs === null || nowMs - heartbeatMs > maxIdleMs || heartbeatMs > nowMs + 5000;
   const failure = current.findLast(event => event.type === "failed");
   const cancelled = current.findLast(event => event.type === "cancelled");
@@ -96,7 +96,7 @@ export function reportStatus(value, nowMs = Date.now()) {
     !["running", "failed", "cancelled", "unknown", "aborted", "download-started", "host-accepted"].includes(value.outcome))
     return { verdict: "UNKNOWN", reason: "Invalid or missing job summary.", source: "job-report" };
   const heartbeat = Date.parse(value.updatedAt), stale = !Number.isFinite(heartbeat) || nowMs - heartbeat > 45_000 || heartbeat > nowMs + 5000;
-  return { verdict: value.phase === "failed" ? "FAILED" : value.phase === "cancelled" ? "CANCELLED"
+  return { verdict: value.phase === "failed" && (value.outcome !== "unknown" || value.cleanupComplete !== true) ? "FAILED" : value.phase === "cancelled" ? "CANCELLED"
       : value.outcome === "running" ? (stale ? "UNKNOWN" : "RUNNING") : value.outcome.toUpperCase().replaceAll("-", "_"),
     jobId: value.jobId, buildId: typeof value.buildId === "string" && /^[a-f0-9]{64}:(test|production|development)$/.test(value.buildId) ? value.buildId : null,
     heartbeatAt: Number.isFinite(heartbeat) ? new Date(heartbeat).toISOString() : null, stale, source: "job-report",

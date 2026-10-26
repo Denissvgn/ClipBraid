@@ -9,6 +9,7 @@ import React, {
 import { Flow, audioFileType } from "./platform";
 import { platformFailure } from "./services/platformError";
 import { recordedDuration } from "./services/audioDuration";
+import { sourceHasAudio } from "./services/sourceAudio";
 import {
   assertProjectSize,
   parseProject,
@@ -198,8 +199,8 @@ export default function App() {
   const [recDuration, setRecDuration] = useState(10);
   const recordingRef = useRef<{ cancel: AbortController; stop: AbortController; epoch: number } | null>(null);
   const recordingEpoch = useRef(0);
-  const [mediaNotice, setMediaNotice] = useState<{ category: string; message: string } | null>(null);
-  const mediaFailure = (error: unknown) => { const value = platformFailure(error); setMediaNotice({ category: value.category, message: value.message }); return value; };
+  const [mediaNotice, setMediaNotice] = useState<{ category: string; message: string; deliveryMayHaveStarted?: boolean } | null>(null);
+  const mediaFailure = (error: unknown) => { const value = platformFailure(error); setMediaNotice({ category: value.category, message: value.message, deliveryMayHaveStarted: value.deliveryMayHaveStarted }); return value; };
 
   const [transitionDuration, setTransitionDuration] = useState(0.5);
   const [aspectRatio, setAspectRatio] = useState<"16:9" | "9:16" | "1:1">(
@@ -800,9 +801,17 @@ export default function App() {
           staged[index].sourceId,
         ]),
       );
+      const videoSources = new Set(data.mediaAssets.filter(clip => clip.type === "video").map(clip => idMap.get(clip.sourceId)!));
+      const audioPresence = new Map<string, boolean>();
+      for (const sourceId of videoSources) {
+        try { audioPresence.set(sourceId, await sourceHasAudio(storeRef.current!.bytesFor(sourceId)!, work.signal)); }
+        catch { work.check(); /* Keep damaged sources available for inspection/relink; export preflight will reject them. */ }
+      }
+      work.check();
       const restoredMedia = data.mediaAssets.map((clip) => ({
         ...clip,
         sourceId: idMap.get(clip.sourceId)!,
+        hasAudio: clip.type === "video" ? audioPresence.get(idMap.get(clip.sourceId)!) ?? clip.hasAudio : clip.hasAudio,
       }));
       const restoredAudio = data.audioTracks.map((track) => ({
         ...track,
@@ -1119,6 +1128,7 @@ export default function App() {
       </header>
       {mediaNotice && <div className="source-notice recovery-notice" data-media-category={mediaNotice.category} role={mediaNotice.category === "cancelled" ? "status" : "alert"}>
         <span><strong>{mediaNoticeTitle(mediaNotice.category)}</strong> {["project", "relink"].includes(mediaNotice.category) ? mediaNotice.message : ""} {mediaRecovery(mediaNotice.category)}</span>
+        {mediaNotice.deliveryMayHaveStarted && <p>Check your downloads or host files before retrying; a file may already exist.</p>}
         <details><summary>Technical details</summary><p>{mediaNotice.message}</p></details>
         <button className="button secondary" onClick={() => setMediaNotice(null)}>Dismiss media message</button>
       </div>}

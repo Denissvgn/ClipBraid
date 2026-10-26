@@ -1,6 +1,7 @@
 /** Normalized browser/Flow contracts. External device persistence remains host-owned. */
 import { PlatformError, platformFailure, abortable } from "./services/platformError";
 import { recordedDuration } from "./services/audioDuration";
+import { saveReceipt } from "./services/saveReceipt";
 export interface SelectedMedia { mediaId: string; base64: string; mimeType: string; type: "image" | "video" | "audio" | string; name: string }
 export interface RecordedAudio { base64: string; mimeType: string; durationMs: number }
 export interface FlowApi {
@@ -69,20 +70,26 @@ async function browserRecord(options: { durationMs: number; signal?: AbortSignal
   if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") throw new PlatformError("Microphone recording is unsupported in this browser.", "unsupported");
   const permissionSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000);
   const stream = await abortable(navigator.mediaDevices.getUserMedia({ audio: true }), permissionSignal, value => value.getTracks().forEach(track => track.stop()));
-  let recorder: MediaRecorder | undefined, timer: ReturnType<typeof setTimeout> | undefined;
-  const stop = () => { if (recorder && recorder.state !== "inactive") recorder.stop(); };
+  let recorder: MediaRecorder | undefined, timer: ReturnType<typeof setTimeout> | undefined, stopTimer: ReturnType<typeof setTimeout> | undefined;
+  let pending = true;
   let rejectRecording: (error: unknown) => void = () => {};
-  const cancel = () => { try { stop(); } finally { rejectRecording(new PlatformError("Recording cancelled.", "cancelled")); } };
+  const stop = () => {
+    try { if (recorder && recorder.state !== "inactive") recorder.stop(); }
+    catch (error) { rejectRecording(platformFailure(error)); }
+    finally { stream.getTracks().forEach(track => track.stop()); }
+    if (pending && !stopTimer) stopTimer = setTimeout(() => rejectRecording(new PlatformError("Recording did not finish after stop. Try recording again.", "transport")), 5000);
+  };
+  const cancel = () => { stop(); rejectRecording(new PlatformError("Recording cancelled.", "cancelled")); };
   try {
     signal?.throwIfAborted();
     const preferred = ["audio/webm;codecs=opus", "audio/mp4"].find(type => MediaRecorder.isTypeSupported(type));
     recorder = preferred ? new MediaRecorder(stream, { mimeType: preferred }) : new MediaRecorder(stream);
     const chunks: Blob[] = [];
     const result = new Promise<Blob>((resolve, reject) => {
-      rejectRecording = reject;
+      rejectRecording = error => { pending = false; clearTimeout(stopTimer); reject(error); };
       recorder!.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
-      recorder!.onstop = () => resolve(new Blob(chunks, { type: recorder!.mimeType }));
-      recorder!.onerror = event => reject(platformFailure((event as Event & { error?: unknown }).error ?? new Error("Recorder failed.")));
+      recorder!.onstop = () => { pending = false; clearTimeout(stopTimer); resolve(new Blob(chunks, { type: recorder!.mimeType })); };
+      recorder!.onerror = event => rejectRecording(platformFailure((event as Event & { error?: unknown }).error ?? new Error("Recorder failed.")));
     });
     signal?.addEventListener("abort", cancel, { once: true }); stopSignal?.addEventListener("abort", stop, { once: true });
     recorder.start(); timer = setTimeout(stop, durationMs); if (stopSignal?.aborted) stop();
@@ -91,7 +98,7 @@ async function browserRecord(options: { durationMs: number; signal?: AbortSignal
     const actual = await recordedDuration(blob, signal);
     return { base64: await readBlob(blob, signal), mimeType: blob.type, durationMs: actual };
   } finally {
-    clearTimeout(timer); signal?.removeEventListener("abort", cancel); stopSignal?.removeEventListener("abort", stop);
+    pending = false; clearTimeout(timer); clearTimeout(stopTimer); signal?.removeEventListener("abort", cancel); stopSignal?.removeEventListener("abort", stop);
     if (recorder) { recorder.ondataavailable = recorder.onstop = recorder.onerror = null; try { stop(); } catch {} }
     stream.getTracks().forEach(track => track.stop());
   }
@@ -115,6 +122,10 @@ async function triggerDownload(payload: { base64: string; mimeType: string; name
   setTimeout(() => URL.revokeObjectURL(url), 10000); return true;
 }
 const host = () => window.Flow;
+const invokedFailure = (error: unknown) => {
+  const failure = platformFailure(error);
+  return new PlatformError(failure.message, failure.category, failure.deliveryMayHaveStarted || ["transport", "unknown"].includes(failure.category));
+};
 const guard = async <T,>(action: () => Promise<T>) => { try { return await action(); } catch (error) { throw platformFailure(error); } };
 export const Flow: FlowApi = {
   get capabilities() {
@@ -125,11 +136,12 @@ export const Flow: FlowApi = {
     return { ...value };
   },
   media: { select: options => guard(async () => {
+    options.signal?.throwIfAborted();
     if (!["all","audio","video","image"].includes(options.filter)) throw new PlatformError("Unsupported picker filter.", "unsupported");
     if (host()) {
       if (typeof host()!.media?.select !== "function") throw new PlatformError("Host picker is unavailable.", "unsupported");
       const signal = options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(300000)]) : AbortSignal.timeout(300000);
-      return selected(await abortable(host()!.media.select({ filter: options.filter }), signal), options.filter);
+      return selected(await abortable(host()!.media.select({ filter: options.filter, signal }), signal), options.filter);
     }
     const accept = options.filter === "all" ? "video/*,image/*" : `${options.filter}/*`;
     const file = await pickFile(accept, options.signal); if (!file) return null;
@@ -138,20 +150,34 @@ export const Flow: FlowApi = {
     return selected({ name: file.name, mediaId: `local-${crypto.randomUUID()}`, mimeType, base64: await readBlob(file, options.signal) }, options.filter);
   }) },
   microphone: { record: options => guard(async () => {
+    options.signal?.throwIfAborted(); options.stopSignal?.throwIfAborted();
     if (!Number.isFinite(options.durationMs) || options.durationMs < 1 || options.durationMs > 60000) throw new PlatformError("Recording length must be 1 ms to 60 seconds.", "unsupported");
     if (!host()) return browserRecord(options);
     const microphone = host()!.microphone;
     if (typeof microphone?.record !== "function" || typeof microphone.cancel !== "function") throw new PlatformError("This host has no cancellable microphone contract. Record externally and import the file.", "unsupported");
-    let cancellation: Promise<unknown> | undefined, completed = false;
+    let cancellation: Promise<unknown> | undefined, completed = false, recordingReturned = false;
+    let rejectControl!: (error: unknown) => void;
+    const controlFailure = new Promise<never>((_, reject) => { rejectControl = reject; });
+    void controlFailure.catch(() => {});
     const cancelRequest = () => cancellation ??= Promise.resolve().then(() => microphone.cancel!());
     const cancel = () => { void cancelRequest().catch(() => {}); };
-    const stop = () => { if (microphone.stop) void Promise.resolve().then(() => microphone.stop!()).catch(() => {}); };
-    if (options.stopSignal && !microphone.stop) throw new PlatformError("This host cannot stop recording early.", "unsupported");
+    const stop = () => {
+      if (recordingReturned || typeof microphone.stop !== "function") return;
+      void Promise.resolve().then(() => microphone.stop!()).then(acknowledgement => {
+        if (recordingReturned) return;
+        if (acknowledgement === false) throw new PlatformError("The host rejected early recording stop; capture was cancelled.", "rejected");
+        const value = acknowledgement as { stopped?: unknown; cancelled?: unknown; accepted?: unknown } | null;
+        if (acknowledgement !== true && !(value && typeof value === "object" && (value.stopped === true || value.cancelled === true || value.accepted === true)))
+          throw new PlatformError("The host did not confirm early recording stop; capture cancellation was requested.", "unknown");
+      }).catch(error => rejectControl(platformFailure(error)));
+    };
+    if (options.stopSignal && typeof microphone.stop !== "function") throw new PlatformError("This host cannot stop recording early.", "unsupported");
     options.signal?.addEventListener("abort", cancel, { once: true }); options.stopSignal?.addEventListener("abort", stop, { once: true });
     try {
       const deadline = AbortSignal.timeout(options.durationMs + 10000);
       const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
-      const result = await abortable(microphone.record({ durationMs: options.durationMs }), signal);
+      const result = await abortable(Promise.race([microphone.record({ durationMs: options.durationMs }), controlFailure]), signal);
+      recordingReturned = true;
       if (!result || typeof result.mimeType !== "string" || !result.mimeType.startsWith("audio/") || !Number.isFinite(result.durationMs) || result.durationMs <= 0) throw new PlatformError("Invalid host recording response.", "transport");
       const data = base64(result.base64), blob = new Blob([Uint8Array.from(atob(data), char => char.charCodeAt(0))], { type: result.mimeType });
       const durationMs = await recordedDuration(blob, options.signal); completed = true;
@@ -172,17 +198,21 @@ export const Flow: FlowApi = {
     const request = requestPayload(payload);
     if (!host()) return triggerDownload(request);
     if (typeof host()!.download !== "function") throw new PlatformError("Host project download is unavailable.", "unsupported");
-    const result = await abortable(host()!.download({ ...payload, base64: request.base64 }), AbortSignal.timeout(30000));
-    if (result && typeof result === "object" && (result as {cancelled?:unknown}).cancelled === true)
-      throw new PlatformError("Project download was cancelled.", "cancelled");
-    if (result === true || (result && typeof result === "object" && (result as {accepted?:unknown}).accepted === true)) return true;
-    throw new PlatformError("Host project download was not acknowledged.", result === false ? "rejected" : "unknown", result !== false);
+    let result: unknown;
+    try { result = await abortable(host()!.download({ ...payload, base64: request.base64 }), AbortSignal.timeout(30000)); }
+    catch (error) { throw invokedFailure(error); }
+    saveReceipt(result, true); return true;
   }),
   save: payload => guard(async () => {
+    payload.signal?.throwIfAborted();
     const request = requestPayload(payload);
-    if (!host()) return triggerDownload({ ...request, signal: payload.signal });
-    if (typeof host()!.save !== "function") throw new PlatformError("Host video save is unavailable.", "unsupported");
-    return host()!.save({ ...payload, base64: request.base64 });
+    const adapter = host();
+    if (!adapter) { await triggerDownload({ ...request, signal: payload.signal }); return { outcome: "download-started" }; }
+    if (typeof adapter.save !== "function") throw new PlatformError("Host video save is unavailable.", "unsupported");
+    let result: unknown;
+    try { result = await adapter.save({ ...payload, base64: request.base64 }); }
+    catch (error) { throw invokedFailure(error); }
+    return saveReceipt(result, true);
   }),
 };
 declare global { interface Window { Flow?: FlowApi } }

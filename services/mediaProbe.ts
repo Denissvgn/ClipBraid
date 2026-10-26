@@ -59,7 +59,7 @@ export async function probeAsset(asset: MediaAsset | AudioFragment, blob: Blob):
     if (audio) {
       const decodable = await audio.canDecode(), firstTimestamp = await audio.getFirstTimestamp(), endTimestamp = await audio.computeDuration();
       result.audio = { codec: String(await audio.getCodec()), decodable, firstTimestamp, endTimestamp };
-      const required = trackGain(asset) > 0 && (kind === "audio" || ((asset as MediaAsset).hasAudio && !(asset as MediaAsset).muted));
+      const required = trackGain(asset) > 0 && (kind === "audio" || !(asset as MediaAsset).muted);
       if (required) {
         if (!decodable) throw new Error("Unsupported audio codec.");
         const start = kind === "video" ? (asset as MediaAsset).trimStart : 0, end = Math.min(endTimestamp, start + asset.duration);

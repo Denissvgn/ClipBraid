@@ -17,10 +17,26 @@ export async function validateSegments(chunks: Uint8Array[], profile: OutputProf
       if (!video) throw new Error("Segment has no video.");
       const config = await context.resources.wait(video.getDecoderConfig(), release);
       if (!config) throw new Error("Encoded segment decoder configuration is missing.");
+      if (!/^avc[13]\./i.test(config.codec)) throw new Error("Encoded segment codec is not AVC.");
       const duration = await context.resources.wait(video.computeDuration(), release), first = await video.getFirstTimestamp();
+      const resolution = await context.resources.wait(video.getTimeResolution(), release);
+      const expectedFrames = segments[index].frameEnd - segments[index].frameStart;
+      if (!Number.isSafeInteger(expectedFrames) || expectedFrames < 1 || !Number.isFinite(resolution) || resolution <= 0)
+        throw new Error("Encoded segment timing configuration is invalid.");
+      const tolerance = Math.min(.1 / profile.fps, 1 / resolution + 1e-6), seen = new Uint8Array(expectedFrames);
       let frames = 0;
-      for await (const _ of new EncodedPacketSink(video).packets()) { context.resources.signal.throwIfAborted(); frames++; }
-      if (config.codedWidth !== profile.width || config.codedHeight !== profile.height || frames !== segments[index].frameEnd - segments[index].frameStart ||
+      for await (const packet of new EncodedPacketSink(video).packets()) {
+        context.resources.signal.throwIfAborted();
+        if (frames === 0 && packet.type !== "key") throw new Error("Encoded segment is not independently decodable from a keyframe.");
+        const frame = Math.round(packet.timestamp * profile.fps);
+        if (!Number.isFinite(packet.timestamp) || !Number.isFinite(packet.duration) || packet.duration <= 0 ||
+          frame < 0 || frame >= expectedFrames || seen[frame] ||
+          Math.abs(packet.timestamp - frame / profile.fps) > tolerance || Math.abs(packet.duration - 1 / profile.fps) > 2 * tolerance)
+          throw new Error("Encoded segment timestamps do not match the output frame grid.");
+        seen[frame] = 1; frames++;
+      }
+      if (config.codedWidth !== profile.width || config.codedHeight !== profile.height || frames !== expectedFrames ||
+        !Number.isFinite(first) || !Number.isFinite(duration) || duration <= 0 ||
         Math.abs(first) > 1e-5 || Math.abs(duration - frames / profile.fps) > 1 / profile.fps + 1e-5)
         throw new Error("Encoded segment geometry, frame count or timestamps are incompatible.");
       signatures.push(JSON.stringify({ codec: config.codec, width: config.codedWidth, height: config.codedHeight,
