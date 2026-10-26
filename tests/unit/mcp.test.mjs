@@ -6,12 +6,13 @@ import {
   parseJournal,
   insertEntry,
   exportVerdict,
+  exportStatus,
 } from "../../mcp-server/lib.js";
 
 test("structured export delivery states do not imply device persistence", () => {
   for (const [type, verdict] of [["download-started","DOWNLOAD_STARTED"],["host-accepted","HOST_ACCEPTED"],["unknown","UNKNOWN"],["cancelled","CANCELLED"],["failed","FAILED"]])
-    assert.equal(exportVerdict(`EXPORT STARTED\nEXPORT EVENT ${JSON.stringify({schemaVersion:1,jobId:"job",buildId:"build",type})}`),verdict);
-  assert.equal(exportVerdict(`EXPORT STARTED\nEXPORT EVENT ${JSON.stringify({schemaVersion:1,jobId:"job",buildId:"build",type:"started"})}\nFinal payload: 10 MiB\nEXPORT COMPLETE`),"RUNNING");
+    assert.equal(exportVerdict(`EXPORT STARTED\nEXPORT EVENT ${JSON.stringify({schemaVersion:1,jobId:"job",buildId:"build",type,at:new Date().toISOString()})}`),verdict);
+  assert.equal(exportVerdict(`EXPORT STARTED\nEXPORT EVENT ${JSON.stringify({schemaVersion:1,jobId:"job",buildId:"build",type:"started",at:new Date().toISOString()})}\nFinal payload: 10 MiB\nEXPORT COMPLETE`),"RUNNING");
 });
 
 test("MCP journal parser keeps historical entries in order", () => {
@@ -55,6 +56,16 @@ test(
         entries.length <= 1,
         "Read limit respected even when a fresh checkout has no local journal",
       );
+      for (const [name, args] of [
+        ["journal_read",{limit:-1}], ["journal_read",{limit:0}], ["journal_read",{limit:1.5}], ["journal_read",{limit:"5"}],
+        ["journal_read",{query:{}}], ["journal_read",{limit:51}], ["journal_read",{path:"/etc/passwd"}],
+        ["export_logs",{name:"verify",lines:-20}], ["export_logs",{name:"verify",lines:101}], ["e2e_status",{name:"../../etc/passwd"}],
+        ["journal_append",{title:"x\n## forged",body:"body"}], ["journal_append",{title:"valid",body:"## forged"}],
+        ["journal_append",{title:"x",body:"a".repeat(16385)}], ["journal_append",{title:3,body:"body"}],
+      ]) {
+        const rejected = await client.callTool({ name, arguments:args });
+        assert.equal(rejected.isError,true,`${name}: ${JSON.stringify(args).slice(0,80)}`);
+      }
     } finally {
       await client.close();
       await transport.close();
@@ -64,10 +75,10 @@ test(
 
 test("delivery status requires acknowledgement and prioritizes failure over payload or completion", () => {
   for (const text of [
-    "Final payload: 2 MB",
+    "EXPORT STARTED\nFinal payload: 2 MB",
     "EXPORT STARTED\nFinal payload: 2 MB",
   ])
-    assert.equal(exportVerdict(text), "RUNNING");
+    assert.equal(exportVerdict(text, {mtimeMs: Date.now()}), "RUNNING");
   for (const text of [
     "Final payload: 2 MB\nEXPORT FAILED: save rejected",
     "EXPORT COMPLETE\nEXPORT FAILED",
@@ -78,10 +89,10 @@ test("delivery status requires acknowledgement and prioritizes failure over payl
     exportVerdict(
       "Final payload\nEXPORT COMPLETE: save adapter accepted the video",
     ),
-    "COMPLETE",
+    "UNKNOWN",
   );
   assert.equal(
-    exportVerdict("EXPORT FAILED\nEXPORT STARTED\nFinal payload"),
+    exportVerdict("EXPORT FAILED\nEXPORT STARTED\nFinal payload", {mtimeMs:Date.now()}),
     "RUNNING",
   );
   assert.equal(exportVerdict("Final payload\nSTALL"), "STALLED");
@@ -105,4 +116,26 @@ test("journal timestamps use UTC+3 across host time zones and date rollover", as
       expected,
     );
   }
+});
+
+
+test("structured status isolates jobs, prioritizes failure/cancel and expires abandoned runs", () => {
+  const now = Date.parse("2026-10-26T12:00:00Z"), at = new Date(now).toISOString();
+  const event = (jobId,type,time=at) => `EXPORT EVENT ${JSON.stringify({schemaVersion:1,jobId,buildId:"build",type,at:time})}`;
+  const live = event("old","failed")+"\n"+event("new","started")+"\n"+event("old","failed");
+  assert.equal(exportStatus(live,{nowMs:now}).verdict,"RUNNING");
+  assert.equal(exportStatus(live,{nowMs:now+46000}).verdict,"UNKNOWN");
+  assert.equal(exportStatus(live,{nowMs:now,aborted:true}).verdict,"ABORTED");
+  for (const type of ["failed","cancelled","unknown"]) {
+    const log = event("new","started")+"\n"+event("new",type)+"\n"+event("new","host-accepted");
+    assert.equal(exportStatus(log,{nowMs:now}).verdict,type.toUpperCase());
+  }
+  assert.equal(exportStatus("EXPORT STARTED\nFinal payload\nSave rejected",{mtimeMs:now,nowMs:now}).verdict,"FAILED");
+  assert.equal(exportStatus("",{nowMs:now}).verdict,"UNKNOWN");
+  assert.equal(exportStatus(event("new","started")+"\nEXPORT STOPPED: AbortError\n"+event("new","cancelled"),{nowMs:now}).verdict,"CANCELLED");
+});
+
+test("journal timestamps honor configured zones including daylight saving", () => {
+  assert.match(insertEntry("", "title", "body",new Date("2026-07-01T00:00:00Z"),"America/New_York"), /2026-06-30 20:00 UTC-4/);
+  assert.match(insertEntry("", "title", "body",new Date("2026-01-01T00:00:00Z"),"America/New_York"), /2025-12-31 19:00 UTC-5/);
 });

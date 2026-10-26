@@ -22,7 +22,7 @@ export type ExportPhaseResult =
   | { phase: "saving"; accepted: true };
 export interface ExportResult { videoBytes: number; delivery: "download-started" | "host-accepted" }
 export type ExportEventType = "started" | "rendered" | "muxed" | "verified" | "delivery-started" | "download-started" | "host-accepted" | "failed" | "cancelled" | "unknown";
-export interface ExportEvent { schemaVersion: 1; jobId: string; buildId: string; type: ExportEventType; elapsedMs: number; detail: Record<string, unknown> }
+export interface ExportEvent { schemaVersion: 1; jobId: string; buildId: string; type: ExportEventType; at: string; elapsedMs: number; detail: Record<string, unknown> }
 export interface ExportState {
   jobId: string | null;
   phase: ExportPhase;
@@ -203,7 +203,7 @@ export class ExportJobs {
       beginDelivery: () => { context.event("delivery-started"); update({ cancellable: false }); },
       event: (type, detail = {}) => {
         if (this.state.jobId !== jobId || !this.state.active) return;
-        const event: ExportEvent = { schemaVersion: 1, jobId, buildId: this.buildId, type,
+        const event: ExportEvent = { schemaVersion: 1, jobId, buildId: this.buildId, type, at: new Date().toISOString(),
           elapsedMs: Math.floor(performance.now() - started), detail };
         update({ events: [...this.state.events.slice(-79), event],
           logs: [...this.state.logs.slice(-19), `EXPORT EVENT ${JSON.stringify(event)}`] });

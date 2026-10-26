@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // ClipBraid MCP server: journal + system state for agents. stdio transport.
 // Run: `npm run mcp`. Read-only except journal_append.
-import { readFile, writeFile, stat, mkdir } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
@@ -14,25 +14,18 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   parseJournal,
-  insertEntry,
-  exportVerdict,
+  exportStatus,
   LOG_NAMES,
   LOG_ALLOWLIST,
 } from "./lib.js";
-import { TOOLS } from "./tools.js";
+import { TOOLS, validateArguments } from "./tools.js";
+import { appendJournal, readJournal, readBounded, MAX_LOG_BYTES } from "./storage.js";
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const JOURNAL = path.join(ROOT, "reports", "development", "JOURNAL.md");
-async function readJournal() {
-  try {
-    return await readFile(JOURNAL, "utf8");
-  } catch (error) {
-    if (error.code === "ENOENT")
-      return "# ClipBraid development journal\n\n---\n";
-    throw error;
-  }
-}
+const TIME_ZONE = process.env.CLIPBRAID_TIME_ZONE || "Europe/Moscow";
+new Intl.DateTimeFormat("en", { timeZone: TIME_ZONE }); // Reject invalid configuration before accepting writes.
 const text = (t) => ({ content: [{ type: "text", text: t }] });
 const err = (t) => ({ content: [{ type: "text", text: t }], isError: true });
 async function git(args) {
@@ -40,6 +33,7 @@ async function git(args) {
     const { stdout } = await execFileAsync("git", args, {
       cwd: ROOT,
       timeout: 15000,
+      maxBuffer: 256 * 1024,
     });
     return stdout.trim();
   } catch (e) {
@@ -55,9 +49,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: TOOLS,
 }));
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args = {} } = request.params;
+  try {
+  const { name, arguments: raw = {} } = request.params;
+  const args = validateArguments(name, raw);
   if (name === "journal_read") {
-    const md = await readJournal();
+    const md = await readJournal(JOURNAL);
     let entries = parseJournal(md);
     if (args.query) {
       const q = String(args.query).toLowerCase();
@@ -68,20 +64,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     return text(
       JSON.stringify(
-        entries.slice(0, Math.min(Number(args.limit ?? 5), 50)),
+        entries.slice(0, args.limit ?? 5),
         null,
         2,
       ),
     );
   }
   if (name === "journal_append") {
-    const md = await readJournal();
-    await mkdir(path.dirname(JOURNAL), { recursive: true });
-    await writeFile(
-      JOURNAL,
-      insertEntry(md, String(args.title), String(args.body)),
-      "utf8",
-    );
+    await appendJournal(JOURNAL, args.title, args.body, TIME_ZONE);
     return text(`appended entry "${args.title}"`);
   }
   if (name === "project_state") {
@@ -92,9 +82,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     ]);
     let tsc = "clean";
     try {
-      await execFileAsync("npx", ["tsc", "--noEmit"], {
+      await execFileAsync(process.execPath, [path.join(ROOT, "node_modules", "typescript", "bin", "tsc"), "--noEmit"], {
         cwd: ROOT,
         timeout: 120000,
+        maxBuffer: 256 * 1024,
       });
     } catch (e) {
       tsc = String(e.stdout ?? e.message).slice(0, 500);
@@ -132,18 +123,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     file &&
     LOG_ALLOWLIST.has(file)
   ) {
-    const logText = await readFile(file, "utf8").catch(() => "");
-    if (!logText) return text(`log "${args.name}" is empty or missing`);
+    const { text: logText, mtimeMs, truncated } = await readBounded(file, MAX_LOG_BYTES, true);
     if (name === "export_logs") {
-      const n = Math.min(Number(args.lines ?? 20), 100);
-      return text(logText.trim().split("\n").slice(-n).join("\n"));
+      return text(logText ? logText.trim().split("\n").slice(-(args.lines ?? 20)).join("\n") : "Log is empty or missing.");
     }
     const threadLines = logText.split("\n").filter((l) => /Thread \d/.test(l));
     return text(
       JSON.stringify(
         {
           log: args.name,
-          verdict: exportVerdict(logText),
+          ...exportStatus(logText, { mtimeMs }),
+          truncated,
           lastProgress: threadLines.slice(-4),
           pageErrors: /PAGEERRORS:\s*(\[.*\])/.exec(logText)?.[1] ?? "n/a",
         },
@@ -158,5 +148,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     );
   }
   return err(`unknown tool "${name}"`);
+  } catch (error) { return err(String(error.message ?? error).slice(0, 500)); }
 });
 await server.connect(new StdioServerTransport());
