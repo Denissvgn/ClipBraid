@@ -9,6 +9,8 @@ export function useJobDiagnostics(state: ExportState) {
   const ignoredJob = useRef<string | null>(null);
   const [reports, setReports] = useState<JobReport[]>([]);
   const [warning, setWarning] = useState("");
+  const report = createJobReport(state), currentReport = useRef<JobReport | null>(null);
+  if (report) currentReport.current = report;
   const problem = () => setWarning("Diagnostic history could not be saved on this device. You can still copy the current job’s diagnostics.");
   const persist = () => {
     const report = createJobReport(latest.current);
@@ -33,5 +35,5 @@ export function useJobDiagnostics(state: ExportState) {
     try { history.current.clear(); ignoredJob.current = latest.current.jobId; clearTimeout(timer.current); timer.current = undefined; setReports([]); setWarning(""); }
     catch { problem(); }
   };
-  return { reports, warning, clear };
+  return { reports, warning, clear, currentReport: currentReport.current };
 }

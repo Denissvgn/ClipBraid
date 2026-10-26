@@ -62,11 +62,20 @@ test("failed proxies fall back, retry is bounded and a legacy source can be reli
   await openEditor(page); await loadDraft(page, draft([await large()]));
   await page.waitForFunction(() => window.__clipbraidE2E.proxyState()[0]?.status === "failed");
   expect(await page.evaluate(() => window.failedProxyCalls)).toBe(2);
-  await expect(page.getByText(/Original media is playing/)).toBeVisible();
+  await expect(page.getByText(/Original media is retained/)).toBeVisible();
+  await expect(page.getByText(/injected proxy fault/)).not.toBeVisible();
+  const fallbackUrl=await page.locator("video").first().getAttribute("src");
+  const fallbackHash=await page.locator("video").first().evaluate(async video=>{
+    const bytes=await(await fetch(video.currentSrc||video.src)).arrayBuffer();
+    return [...new Uint8Array(await crypto.subtle.digest("SHA-256",bytes))].map(byte=>byte.toString(16).padStart(2,"0")).join("");
+  });
+  expect(fallbackHash).toBe(sha(await readFile("tests/fixtures/oversized-av.mp4")));
+  expect(await page.evaluate(()=>window.__clipbraidE2E.mediaInventory().sources[0].derived)).toEqual([]);
   const before = await saveDraft(page);
   await page.evaluate(() => { window.failProxy = false; });
   await page.getByRole("button", { name: "Optimize previews", exact: true }).click();
   await page.waitForFunction(() => window.__clipbraidE2E.proxyState()[0]?.status === "ready");
+  await expect(page.locator("video").first()).not.toHaveAttribute("src",fallbackUrl);
   expect((await saveDraft(page)).mediaAssets[0].base64).toBe(before.mediaAssets[0].base64);
   await loadDraft(page, draft([await asset("bars-fractional-av.mp4", { normalized: true, hasAudio: false, duration: 0.3, trimStart: 0.1, trimEnd: 0.6 })]));
   await page.getByRole("button", { name: "Edit bars-fractional-av.mp4", exact: true }).click();

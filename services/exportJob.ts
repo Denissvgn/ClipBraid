@@ -235,7 +235,7 @@ export class ExportJobs {
       },
       addLog: message => {
         if (this.state.jobId !== jobId || !this.state.active) return;
-        beat(); update({ logs: [...this.state.logs.slice(-19), `[+${Math.floor(performance.now() - started)}ms] ${message}`] });
+        beat(); update({ logs: [...this.state.logs.slice(-19), `[+${Math.floor(performance.now() - started)}ms] ${String(message).replace(/[\r\n\u2028\u2029]/g, " ")}`] });
       },
       setExportProgress: progress => {
         if (this.state.jobId !== jobId || !this.state.active || resources.signal.aborted) return;

@@ -57,19 +57,22 @@ export const LOG_ALLOWLIST = new Set([...Object.values(LOG_NAMES), ...Object.val
 
 // Negative terminal outcomes outrank late acknowledgements; a heartbeat is required for RUNNING.
 export function exportStatus(logText, { mtimeMs = null, nowMs = Date.now(), maxIdleMs = 45_000, aborted = false } = {}) {
-  const marker = logText.lastIndexOf("EXPORT STARTED");
-  let run = marker < 0 ? logText : logText.slice(marker);
-  const startedLine = run.lastIndexOf('"type":"started"');
-  if (startedLine >= 0) run = run.slice(run.lastIndexOf("\n", startedLine) + 1);
-  const events = run.split("\n").flatMap(line => {
-    const index = line.indexOf("EXPORT EVENT ");
-    if (index < 0) return [];
-    try { const event = JSON.parse(line.slice(index + 13)); return event.schemaVersion === 1 &&
-      typeof event.jobId === "string" && event.jobId.length <= 160 && typeof event.buildId === "string" && event.buildId.length <= 160 ? [event] : []; }
+  const lines = logText.split("\n"), prefix = /^(?:\[[^\r\n]*?\]\s*)*/;
+  const records = lines.flatMap((line, index) => {
+    const match = line.replace(prefix, "").match(/^EXPORT EVENT\s+(\{.*\})\s*$/);
+    if (!match) return [];
+    try { const event = JSON.parse(match[1]); return event.schemaVersion === 1 &&
+      typeof event.jobId === "string" && event.jobId.length > 0 && event.jobId.length <= 160 && typeof event.buildId === "string" && event.buildId.length > 0 && event.buildId.length <= 160
+      ? [{ event, index }] : []; }
     catch { return []; }
   });
-  const last = events.at(-1), jobId = events.findLast(event => event.type === "started")?.jobId ?? last?.jobId ?? null;
-  const current = events.filter(event => event.jobId === jobId);
+  const started = records.findLast(record => record.event.type === "started");
+  const legacyStart = lines.findLastIndex(line => /^EXPORT STARTED(?:\s|$)/.test(line.replace(prefix, "")));
+  const boundary = started?.index ?? Math.max(0, legacyStart), events = records.filter(record => record.index >= boundary).map(record => record.event);
+  const jobId = started?.event.jobId ?? events.at(-1)?.jobId ?? null, buildId = started?.event.buildId ?? events.at(-1)?.buildId;
+  const current = events.filter(event => event.jobId === jobId && event.buildId === buildId);
+  const runLines = lines.slice(boundary).map(line => line.replace(prefix, ""));
+  const rawFailure = runLines.some(line => /^(Master Export Failed|EXPORT FAILED|EXPORT STOPPED|Export failed|Save rejected)\b/i.test(line));
   const heartbeatMs = Math.max(...current.map(event => Date.parse(event.at)).filter(Number.isFinite), mtimeMs ?? 0) || null;
   const stale = heartbeatMs === null || nowMs - heartbeatMs > maxIdleMs || heartbeatMs > nowMs + 5000;
   const failure = current.findLast(event => event.type === "failed");
@@ -78,9 +81,9 @@ export function exportStatus(logText, { mtimeMs = null, nowMs = Date.now(), maxI
   const delivered = current.findLast(event => ["download-started", "host-accepted"].includes(event.type));
   const terminal = failure ?? cancelled ?? unknown ?? delivered;
   const verdict = failure ? "FAILED" : cancelled ? "CANCELLED" : unknown ? "UNKNOWN"
-    : /Master Export Failed|EXPORT FAILED|EXPORT STOPPED|Export failed|Save rejected/i.test(run) ? "FAILED" : delivered?.type === "download-started" ? "DOWNLOAD_STARTED"
-    : delivered?.type === "host-accepted" ? "HOST_ACCEPTED" : aborted || /RUN ABORTED/.test(run) ? "ABORTED"
-    : run.includes("STALL") ? "STALLED" : stale || (!current.length && !run.includes("EXPORT STARTED")) ? "UNKNOWN" : "RUNNING";
+    : rawFailure ? "FAILED" : delivered?.type === "download-started" ? "DOWNLOAD_STARTED"
+    : delivered?.type === "host-accepted" ? "HOST_ACCEPTED" : aborted || runLines.some(line => /^RUN ABORTED\b/.test(line)) ? "ABORTED"
+    : runLines.some(line => /^STALL\b/.test(line)) ? "STALLED" : stale || (!current.length && legacyStart < 0) ? "UNKNOWN" : "RUNNING";
   return { verdict, jobId, buildId: current.at(-1)?.buildId ?? null,
     heartbeatAt: heartbeatMs === null ? null : new Date(heartbeatMs).toISOString(), stale,
     terminalAt: terminal?.at ?? null, source: current.length ? "structured" : "legacy",

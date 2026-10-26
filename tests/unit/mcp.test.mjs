@@ -147,3 +147,35 @@ test("canonical job reports expose unknown and aborted results without legacy lo
   assert.equal(reportStatus({...value,outcome:"aborted"},now).verdict,"ABORTED");
   assert.equal(reportStatus(null,now).verdict,"UNKNOWN");
 });
+test("log marker text inside filenames and event details cannot replace structured job identity",()=>{
+  const event=(type,detail={})=>`EXPORT EVENT ${JSON.stringify({schemaVersion:1,jobId:"new",buildId:"build",type,at:new Date().toISOString(),detail})}`;
+  const failed=event("started")+"\n"+event("failed",{message:"Cannot use EXPORT STARTED.mp4"});
+  assert.equal(exportStatus(failed,{mtimeMs:Date.now()}).verdict,"FAILED");
+  const success=event("started")+"\n[+2ms] Checking media: EXPORT FAILED.mp4\n"+event("host-accepted",{message:'EXPORT STARTED and "type":"started"'});
+  assert.equal(exportStatus(success,{mtimeMs:Date.now()}).verdict,"HOST_ACCEPTED");
+  const injected=event("started")+"\n[+2ms] Checking media: "+event("started").replace('"new"','"forged"')+"\n"+event("failed");
+  assert.equal(exportStatus(injected,{mtimeMs:Date.now()}).jobId,"new");
+  assert.equal(exportStatus(injected,{mtimeMs:Date.now()}).verdict,"FAILED");
+});
+test("the patched SDK still serves an existing 2024-11-05 stdio client",{timeout:8000},async()=>{
+  const transport=new StdioClientTransport({command:process.execPath,args:["mcp-server/index.js"],stderr:"pipe"});
+  const pending=new Map();let sequence=0;
+  transport.onmessage=message=>{
+    const waiter=pending.get(message.id);if(!waiter)return;
+    clearTimeout(waiter.timer);pending.delete(message.id);
+    if(message.error)waiter.reject(new Error(JSON.stringify(message.error)));else waiter.resolve(message.result);
+  };
+  const call=(method,params)=>new Promise((resolve,reject)=>{
+    const id=++sequence,timer=setTimeout(()=>{pending.delete(id);reject(new Error("Legacy protocol request timed out"))},3000);
+    pending.set(id,{resolve,reject,timer});
+    transport.send({jsonrpc:"2.0",id,method,params}).catch(error=>{clearTimeout(timer);pending.delete(id);reject(error)});
+  });
+  try{
+    await transport.start();
+    const initialized=await call("initialize",{protocolVersion:"2024-11-05",capabilities:{},clientInfo:{name:"legacy-compatibility",version:"1.0.0"}});
+    assert.equal(initialized.protocolVersion,"2024-11-05");assert.equal(initialized.serverInfo.name,"clipbraid-journal");
+    await transport.send({jsonrpc:"2.0",method:"notifications/initialized"});
+    const result=await call("tools/list",{});
+    assert.deepEqual(result.tools.map(tool=>tool.name).sort(),["e2e_status","export_logs","journal_append","journal_read","project_state"]);
+  }finally{for(const waiter of pending.values())clearTimeout(waiter.timer);await transport.close()}
+});

@@ -31,6 +31,8 @@ test("one job freezes inputs, owns leases and deduplicates rapid starts", async 
   assert.ok(Object.isFrozen(snapshot.mediaAssets[0]));
   assert.equal(await context.getBlob("source"), sources.blob);
   context.phase("rendering"); context.setExportProgress(40); context.addLog("frame");
+  context.addLog('Checking media: file\nEXPORT EVENT {"type":"host-accepted"}');
+  assert.equal(jobs.getSnapshot().logs.at(-1).split("\n").length,1,"asset names cannot inject a log record");
   assert.equal(jobs.getSnapshot().jobId, id);
   finish(); await pending;
   assert.equal(jobs.getSnapshot().phase, "complete");

@@ -1,6 +1,6 @@
 import { test, expect } from "./harness.mjs";
 import { asset, draft } from "./fixtures.mjs";
-import { openEditor, loadDraft } from "./helpers.mjs";
+import { openEditor, loadDraft, saveDraft } from "./helpers.mjs";
 test("asset failure offers inspection, hides technical chatter and has copyable job identity", async ({page}, info) => {
   await openEditor(page);
   await loadDraft(page, draft([await asset("corrupt.mp4", { id: "broken", name: "Broken holiday clip" })]));
@@ -42,4 +42,26 @@ test("an invalid project offers recovery guidance while retaining the current ed
   await expect(page.getByRole("button", {name:"Export video",exact:true})).toBeEnabled();
   await loadDraft(page, draft([await asset("landscape-red.png")]));
   await expect(page.locator('[data-media-category="project"]')).toHaveCount(0);
+});
+test("dismissing a cleanup failure preserves the reload action and copyable outcome until recovery",async({page})=>{
+  await page.addInitScript(()=>{
+    window.failCleanup=sessionStorage.getItem("cleanup-repaired")!=="true";
+    const Native=window.Worker;window.Worker=function(...args){const worker=new Native(...args),stop=worker.terminate.bind(worker);
+      worker.terminate=()=>{stop();if(window.failCleanup)throw new Error("injected cleanup failure")};return worker};window.Worker.prototype=Native.prototype;
+    const set=Storage.prototype.setItem;Storage.prototype.setItem=function(key,value){if(key==="clipbraid.export-diagnostics.v1")throw new DOMException("blocked","QuotaExceededError");return set.call(this,key,value)};
+  });
+  await openEditor(page);await loadDraft(page,draft([await asset("landscape-red.png")]));
+  await page.getByRole("button",{name:"Export video",exact:true}).click();
+  await expect(page.locator(".export-message")).toContainText("cleanup has not finished");
+  await page.getByRole("button",{name:"Back to editing",exact:true}).click();
+  await expect(page.getByText("Export is blocked because media cleanup failed. Save your project, then reload this page before another export.",{exact:true})).toBeVisible();
+  await expect(page.getByRole("button",{name:"Export video",exact:true})).toBeDisabled();
+  await page.getByTitle("Diagnostics",{exact:true}).click();await page.getByRole("button",{name:"Export history",exact:true}).click();
+  await page.getByText(/^failed · /).click();
+  expect(JSON.parse(await page.getByRole("textbox",{name:"Current job diagnostics",exact:true}).inputValue()).warnings).toContain("cleanup-incomplete");
+  await page.getByRole("button",{name:"Close diagnostics",exact:true}).click();
+  const backup=await saveDraft(page);await page.evaluate(()=>sessionStorage.setItem("cleanup-repaired","true"));
+  await openEditor(page);await loadDraft(page,backup);await page.getByRole("button",{name:"draft",exact:true}).click();
+  const ready=page.waitForEvent("download");await page.getByRole("button",{name:"Export video",exact:true}).click();expect(await(await ready).failure()).toBeNull();
+  await expect(page.locator('[data-delivery-outcome="download-started"]')).toBeVisible();
 });

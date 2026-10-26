@@ -948,7 +948,7 @@ export default function App() {
         <JournalViewer
           reports={jobDiagnostics.reports} warning={jobDiagnostics.warning} onClear={jobDiagnostics.clear}
           currentJobId={exportState.active ? exportState.jobId : null}
-          currentReport={createJobReport(exportState)}
+          currentReport={jobDiagnostics.currentReport}
           onClose={() => setShowJournal(false)}
         />
       )}
@@ -1041,6 +1041,10 @@ export default function App() {
         <button className="button secondary" onClick={() => setMediaNotice(null)}>Dismiss media message</button>
       </div>}
       {jobDiagnostics.warning && <p className="source-notice" role="alert">{jobDiagnostics.warning}</p>}
+      {!exportState.active && !exportState.cleanupComplete && exportState.phase === "idle" && <div className="source-notice recovery-notice" role="alert">
+        <span>Export is blocked because media cleanup failed. Save your project, then reload this page before another export.</span>
+        <button className="button secondary" onClick={() => void handleSaveProject()}>Save project backup</button>
+      </div>}
       {exportState.result && <p className="source-notice" role="status" data-delivery-outcome={exportState.result.delivery}>
         {exportState.result.delivery === "download-started" ? "Last export: Download started. Video/audio structure was checked; final disk storage is controlled by your browser." : "Last export: Host accepted the checked video. Host acceptance does not confirm final device storage."}
       </p>}
