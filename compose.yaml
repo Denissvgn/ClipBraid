@@ -1,0 +1,16 @@
+services:
+  web:
+    image: clipbraid:local
+    build:
+      context: .
+      target: runtime
+    ports:
+      - "127.0.0.1:${CLIPBRAID_PORT:-8080}:8080"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped

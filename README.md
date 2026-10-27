@@ -23,6 +23,38 @@ from pinned `@ffmpeg/core@0.12.6` and set
 the app module. This option uses only that directory; media-tool failures can
 be retried in the editor.
 
+## Run with Docker
+
+With Docker Engine/Desktop and Compose v2 installed:
+
+```bash
+docker compose up --build --wait
+# Open http://localhost:8080
+docker compose down
+```
+
+Use `CLIPBRAID_PORT=8090 docker compose up --build --wait` for another local port.
+Compose binds to localhost. For remote access, put the service behind an HTTPS
+reverse proxy: browsers require a secure origin for export and microphone APIs.
+Keep a stable browser origin to retain access to existing local drafts.
+
+The image builds with the pinned Node/npm toolchain and runs NGINX as a non-root
+user with a read-only filesystem and temporary storage in `/tmp`. Media processing
+and local drafts stay in the browser. The existing FFmpeg CDN dependency described
+above applies to this image as well.
+
+```bash
+docker build --tag clipbraid:local .
+npm run container:test -- clipbraid:local
+```
+
+The smoke check verifies health, served bytes, cache/MIME headers, unavailable
+private paths and the actual Docker-filtered context. `.dockerignore` permits
+only the public source inventory. After adding/removing public build inputs, run
+`npm run container:context`, review its changes, then `npm run container:check`.
+The container CI job builds and checks the image without publishing it. Base
+images use exact versions and digests; update their pins deliberately.
+
 ## Make a video
 
 1. **Add visuals** to choose one video or photo; repeat for each item.

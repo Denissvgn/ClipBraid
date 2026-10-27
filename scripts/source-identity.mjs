@@ -2,9 +2,9 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync, existsSync, realpathSync, lstatSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
-const directories = new Set(["components", "services", "scripts", "tests", "types", "mcp-server", ".github", "assets", "licenses", "guides"]);
+const directories = new Set(["components", "services", "scripts", "tests", "types", "mcp-server", ".github", "assets", "licenses", "guides", "docker"]);
 const publicGuides = new Set(["guides/using-clipbraid.md", "guides/support.md", "guides/upgrading.md"]);
-const rootInputs = new Set([".node-version", ".npmrc", ".gitignore", "LICENSE", "README.md", "THIRD_PARTY_NOTICES.md"]);
+const rootInputs = new Set([".node-version", ".npmrc", ".gitignore", ".dockerignore", "Dockerfile", "docker/nginx.conf", "LICENSE", "README.md", "THIRD_PARTY_NOTICES.md"]);
 const git = (root, args) => execFileSync("git", args, {encoding:"utf8",cwd:root,timeout:5000,maxBuffer:4*1024*1024,stdio:["ignore","pipe","ignore"]});
 function hasRepository(root) {
   if (!existsSync(join(root,".git"))) return false;

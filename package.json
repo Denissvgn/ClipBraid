@@ -44,7 +44,10 @@
     "check:mcp": "tsc -p tsconfig.mcp.json && node --check mcp-server/index.js && node --check mcp-server/lib.js && node --check mcp-server/tools.js",
     "audit:dependencies": "node scripts/audit-dependencies.mjs",
     "check": "node scripts/check-candidate.mjs",
-    "check:style-isolation": "node scripts/check-style-isolation.mjs"
+    "check:style-isolation": "node scripts/check-style-isolation.mjs",
+    "container:context": "node scripts/docker-context.mjs --write",
+    "container:check": "node scripts/docker-context.mjs --check",
+    "container:test": "node scripts/check-container.mjs"
   },
   "type": "module",
   "engines": {
