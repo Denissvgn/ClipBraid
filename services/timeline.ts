@@ -115,6 +115,16 @@ export function trimmedDuration(
   return window.end - window.start;
 }
 
+export function audioSourceWindow(track: AudioFragment): { start: number; end: number } {
+  return sourceWindow({trimStart:track.trimStart??0,trimEnd:track.trimEnd??0,
+    originalDuration:track.originalDuration??track.duration});
+}
+
+export function audioSourceTimeAt(track: AudioFragment,time:number):number {
+  return sourceTimeAt({startTime:track.startTime,trimStart:track.trimStart??0,
+    trimEnd:track.trimEnd??0,originalDuration:track.originalDuration??track.duration},time);
+}
+
 export function sourceTimeAt(
   asset: Pick<
     MediaAsset,

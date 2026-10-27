@@ -6,7 +6,7 @@ const MAX_BYTES = 128 * 1024 * 1024;
 interface Reference { sourceId: string; key: string; sha256: string; mimeType: string; byteLength: number }
 export interface RecoveryUI { exportQuality: "draft" | "standard" | "high"; zoom: number; showSafeZones: boolean; isTheaterMode: boolean; projectFilename?: string }
 export interface LocalRevision {
-  revision: number; formatVersion: 1 | 2; savedAt: number; snapshot: ProjectSnapshot;
+  revision: number; formatVersion: 1 | 2 | 3; savedAt: number; snapshot: ProjectSnapshot;
   references: Reference[]; ui: RecoveryUI;
 }
 interface StoredAsset { key: string; bytes: Blob; sha256: string; mimeType: string; byteLength: number }
@@ -31,7 +31,7 @@ export class RecoveryStore {
   private expectedRevision: number | null = null;
   private transactions = new Set<IDBTransaction>();
   private abortReasons = new WeakMap<IDBTransaction, Error>();
-  constructor(private name = RECOVERY_DATABASE, private version = 2) {}
+  constructor(private name = RECOVERY_DATABASE, private version = 3) {}
   private database(): Promise<IDBDatabase> {
     if (this.opening) return this.opening;
     const generation = this.generation;
@@ -119,9 +119,11 @@ export class RecoveryStore {
     });
     if (generation !== this.generation) throw new DOMException("Storage closed", "AbortError");
     if (!data) { this.expectedRevision = 0; return null; }
-    if (![1, 2].includes(data.record.formatVersion) || !Number.isSafeInteger(data.record.revision) || data.record.revision < 1 ||
+    if (![1, 2, 3].includes(data.record.formatVersion) || !Number.isSafeInteger(data.record.revision) || data.record.revision < 1 ||
       !Number.isSafeInteger(data.record.savedAt) || data.record.savedAt < 0)
       throw new Error("This local draft version is unsupported.");
+    if(data.record.formatVersion<3&&Array.isArray(data.record.snapshot?.audioTracks))data.record.snapshot={...data.record.snapshot,
+      audioTracks:data.record.snapshot.audioTracks.map(({originalDuration,trimStart,trimEnd,...track})=>track)};
     data.record.snapshot = validateProjectMetadata(data.record.snapshot);
     data.record.ui = validateUI(data.record.ui);
     const references = new Map(data.record.references.map(reference => [reference.sourceId, reference]));
@@ -170,7 +172,7 @@ export class RecoveryStore {
         const revision = expected + 1;
         for (const [key, source] of unique) assets.put({ key, bytes: source.bytes, sha256: source.sha256,
           mimeType: source.mimeType, byteLength: source.byteLength });
-        revisions.put({ revision, formatVersion: 2, savedAt: Date.now(), snapshot: clean, references, ui: settings });
+        revisions.put({ revision, formatVersion: 3, savedAt: Date.now(), snapshot: clean, references, ui: settings });
         meta.put({ key: "head", revision });
         const all = revisions.getAll();
         all.onsuccess = this.guarded(tx, () => {

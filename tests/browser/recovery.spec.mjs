@@ -126,7 +126,7 @@ test("schema upgrade abort rolls back and concurrent writers cannot overwrite a 
   });
   expect(result.migration).toContain("injected schema migration fault");
   expect(result.previous).toBe(1);
-  expect(result.previousFormat).toBe(1); expect(result.currentFormat).toBe(2);
+  expect(result.previousFormat).toBe(1); expect(result.currentFormat).toBe(3);
   expect(result.conflict).toContain("another tab");
   expect(result.playhead).toBe(0.5);
 });

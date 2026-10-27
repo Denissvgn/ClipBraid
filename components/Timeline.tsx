@@ -1,22 +1,28 @@
-import React, { useRef, useMemo } from "react";
+import React, { useRef, useMemo, useState } from "react";
 import { MediaAsset, AudioFragment } from "../types";
 import {
   clampPlayhead,
   timelineViewportDuration,
 } from "../services/timeline";
 import { Icon } from "./Icon";
+import {moveAudio} from "../services/editing";
 interface TimelineProps {
   mediaAssets: MediaAsset[];
   audioTracks: AudioFragment[];
   currentTime: number;
   zoom: number;
   selectedAssetId: string | null;
+  selectedAudioId: string | null;
   onSeek: (time: number) => void;
   onDeleteMedia: (id: string) => void;
   onDeleteAudio: (id: string) => void;
   onMoveMedia: (id: string, direction: "left" | "right") => void;
   onToggleMute: (id: string) => void;
   onSelectAsset: (id: string) => void;
+  onSelectAudio:(id:string)=>void;
+  onMoveAudio:(id:string,time:number)=>void;
+  onBeginAudioMove:()=>void;
+  onEndAudioMove:()=>void;
 }
 const timeLabel = (t: number) =>
   `${Math.floor(t / 60)
@@ -30,12 +36,26 @@ export const Timeline: React.FC<TimelineProps> = ({
   currentTime,
   zoom,
   selectedAssetId,
+  selectedAudioId,
   onSeek,
   onDeleteAudio,
   onSelectAsset,
+  onSelectAudio,onMoveAudio,onBeginAudioMove,onEndAudioMove,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const labelWidth = 144;
+  const drag=useRef<{id:string;pointer:number;x:number;start:number;next:number;moved:boolean}|null>(null);
+  const [placement,setPlacement]=useState<{id:string;time:number}|null>(null);
+  const suppressClick=useRef(false);
+  const finishMove=(event:{currentTarget:HTMLButtonElement;pointerId:number},cancel=false)=>{
+    const move=drag.current;if(!move||move.pointer!==event.pointerId)return;
+    drag.current=null;setPlacement(null);
+    if(move.moved){
+      if(!cancel)onMoveAudio(move.id,move.next);
+      onEndAudioMove();suppressClick.current=true;
+    }
+    if(event.currentTarget.hasPointerCapture(event.pointerId))event.currentTarget.releasePointerCapture(event.pointerId);
+  };
   const totalDuration = useMemo(
     () => timelineViewportDuration(mediaAssets, audioTracks),
     [mediaAssets, audioTracks],
@@ -57,6 +77,7 @@ export const Timeline: React.FC<TimelineProps> = ({
   };
   return (
     <section className="timeline" aria-label="Timeline tracks">
+      {!!audioTracks.length&&<p className="timeline-help" id="audio-move-help">Select audio to edit. Drag it horizontally to move, or focus it and use Left/Right (0.1s), Shift+Left/Right (1s), or Home.</p>}
       <div
         className="timeline-scroll"
         ref={containerRef}
@@ -144,20 +165,53 @@ export const Timeline: React.FC<TimelineProps> = ({
                     <Icon name="close" size={14} />
                   </button>
                 </div>
-                <div
-                  className="timeline-audio"
+                <button
+                  className={`timeline-audio ${selectedAudioId===track.id?"selected":""}`}
+                  aria-label={`Edit audio ${index+1}: ${track.name}`}
+                  aria-pressed={selectedAudioId===track.id}
+                  aria-describedby="audio-move-help"
                   style={{
-                    left: labelWidth + track.startTime * zoom,
+                    left: labelWidth + (placement?.id===track.id?placement.time:track.startTime) * zoom,
                     width: Math.max(8, track.duration * zoom),
                   }}
                   title={track.name}
+                  onClick={event=>{event.stopPropagation();if(suppressClick.current){suppressClick.current=false;return}onSelectAudio(track.id)}}
+                  onPointerDown={event=>{
+                    if(!event.isPrimary||event.button!==0||drag.current)return;suppressClick.current=false;
+                    drag.current={id:track.id,pointer:event.pointerId,x:event.clientX,start:track.startTime,next:track.startTime,moved:false};
+                    event.currentTarget.setPointerCapture(event.pointerId);
+                  }}
+                  onPointerMove={event=>{
+                    const move=drag.current;if(!move||move.id!==track.id||move.pointer!==event.pointerId)return;
+                    const delta=event.clientX-move.x;
+                    if(!move.moved&&Math.abs(delta)<4)return;
+                    if(!move.moved){move.moved=true;onBeginAudioMove()}
+                    move.next=moveAudio(track,Math.round((move.start+delta/zoom)*100)/100).startTime;
+                    setPlacement({id:track.id,time:move.next});
+                  }}
+                  onPointerUp={event=>finishMove(event)}
+                  onPointerCancel={event=>finishMove(event,true)}
+                  onLostPointerCapture={event=>finishMove(event,true)}
+                  onKeyDown={event=>{
+                    if(event.key==="Escape"&&drag.current){event.preventDefault();finishMove({currentTarget:event.currentTarget,pointerId:drag.current.pointer},true);return}
+                    if(event.key==="Enter"||event.key===" ")suppressClick.current=false;
+                    if(event.altKey||event.ctrlKey||event.metaKey)return;
+                    if(["ArrowLeft","ArrowRight","Home"].includes(event.key)){
+                      event.preventDefault();event.stopPropagation();
+                      if(!event.repeat)onBeginAudioMove();
+                      const amount=event.shiftKey?1:.1;
+                      onMoveAudio(track.id,event.key==="Home"?0:Math.round((track.startTime+(event.key==="ArrowRight"?amount:-amount))*100)/100);
+                    }
+                  }}
+                  onKeyUp={event=>{if(["ArrowLeft","ArrowRight","Home"].includes(event.key))onEndAudioMove()}}
+                  onBlur={()=>{if(!drag.current)onEndAudioMove()}}
                 >
                   <Icon name="audio" size={16} />
                   <span>{track.name}</span>
                   <span className="clip-duration">
                     {track.duration.toFixed(1)}s
                   </span>
-                </div>
+                </button>
               </div>
             ))
           ) : (

@@ -56,7 +56,7 @@ test("an oversized draft is rejected before parsing and keeps the open project",
   }
 });
 
-test("an unversioned legacy draft loads and re-saves as schema version 2", async ({
+test("an unversioned legacy draft loads and re-saves as schema version 3", async ({
   page,
 }) => {
   await openEditor(page);
@@ -97,7 +97,7 @@ test("an unversioned legacy draft loads and re-saves as schema version 2", async
   const named = page.waitForEvent("download");
   const saved = await saveDraft(page);
   expect((await named).suggestedFilename()).toBe("My RED VOX cut.json");
-  expect(saved.schemaVersion).toBe(2);
+  expect(saved.schemaVersion).toBe(3);
   expect(saved.currentTime).toBe(0.5);
   expect(saved.fitMode).toBe("cover");
   expect(saved.transitionDuration).toBe(0.25);

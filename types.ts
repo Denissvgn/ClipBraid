@@ -33,5 +33,9 @@ export interface AudioFragment {
   name: string;
   startTime: number; // position on timeline in seconds
   duration: number; // in seconds
+  /** Optional in older projects; duration was the whole source window. */
+  originalDuration?: number;
+  trimStart?: number;
+  trimEnd?: number;
   gain?: number; // Linear track volume, 0–1; zero is intentional silence
 }

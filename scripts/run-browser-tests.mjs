@@ -11,7 +11,7 @@ const source={...repositoryState(),inputsSha256:sha(JSON.stringify(inputs))};
 rmSync('reports/browser-results.json',{force:true});
 rmSync('reports/browser-manifest.json',{force:true});
 rmSync('test-results',{recursive:true,force:true});
-const result=spawnSync(process.execPath,['node_modules/@playwright/test/cli.js','test',...process.argv.slice(2)],{stdio:'inherit',timeout:1140000,env:{...process.env,CLIPBRAID_RUN_ID:runId}});
+const result=spawnSync(process.execPath,['node_modules/@playwright/test/cli.js','test',...process.argv.slice(2)],{stdio:'inherit',timeout:1380000,env:{...process.env,CLIPBRAID_RUN_ID:runId}});
 let report;try{report=JSON.parse(readFileSync('reports/browser-results.json','utf8'));}catch{}
 const assessment=assessPlaywright(report,process.argv.length===2),testResults=assessment.tests;
 const smoke=testResults.find(t=>t.title.startsWith('one-second repeated-source'));

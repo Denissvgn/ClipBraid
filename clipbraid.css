@@ -745,7 +745,7 @@ input[type="range"]::-moz-range-thumb {
 .timeline-audio {
   position: absolute;
   top: 8px;
-  height: 42px;
+  height: 44px;
   background: var(--color-audio);
   color: var(--color-audio-ink);
   border: var(--rule-width) solid var(--color-rule-strong);
@@ -756,7 +756,14 @@ input[type="range"]::-moz-range-thumb {
   gap: var(--space-sm);
   overflow: hidden;
   min-width: 0;
+  touch-action: pan-y;
+  cursor: grab;
 }
+.timeline-audio:active { cursor: grabbing; }
+.timeline-audio.selected { outline: 2px solid var(--color-ink); outline-offset: 1px; }
+.timeline-help { margin: var(--space-sm) var(--space-lg); color: var(--color-subtle); font-size: var(--text-xs); }
+.inspector-section input[type="number"] { width:100%; min-height:44px; padding:var(--space-sm); border:var(--rule-width) solid var(--color-rule-strong); border-radius:var(--radius-sm); background:var(--color-surface); color:var(--color-ink); }
+.track-level { margin-top: var(--space-sm); }
 .timeline-audio > svg {
   flex-shrink: 0;
 }

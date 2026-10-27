@@ -26,14 +26,14 @@ test("seeded overlap sweeps agree with the shared interval sampler", () => {
     assert.equal(mixPolicy([], lanes).maxOverlap, peak);
   }
 });
-test("version 1 drafts migrate to version 2 and independent gains round-trip with original bytes", async () => {
+test("version 1 drafts migrate to version 3 and independent gains round-trip with original bytes", async () => {
   const legacy = JSON.parse(readFileSync("tests/fixtures/drafts/legacy-unversioned.migrated.json", "utf8"));
   assert.equal(legacy.schemaVersion, 1);
   const parsed = project.parseProject(JSON.stringify(legacy));
   parsed.mediaAssets[0].gain = 0.25; parsed.audioTracks[0].gain = 0;
   const payloads = new Map(parsed.sources.map(source => [source.sourceId, source.base64]));
   const saved = JSON.parse(await project.serializeProject(parsed, async id => payloads.get(id)));
-  assert.equal(saved.schemaVersion, 2);
+  assert.equal(saved.schemaVersion, 3);
   const restored = project.parseProject(JSON.stringify(saved));
   assert.equal(restored.mediaAssets[0].gain, 0.25);
   assert.equal(restored.audioTracks[0].gain, 0);

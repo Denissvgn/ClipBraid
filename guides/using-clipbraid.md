@@ -11,6 +11,8 @@ The editor is experimental; read the [support and limits](support.md) before a l
    separate copies for playback.
 2. Select a clip on the timeline. Its settings let you trim the beginning/end,
    change its look, use **Earlier**/**Later**, remove it, or adjust original sound.
+   Photos also have a **Photo duration** setting. Enter a time and press Enter or
+   leave the field to apply it; Escape cancels the field edit.
    Close **Clip settings** to return to project settings.
 3. Choose an aspect ratio. **Fit whole image** keeps the whole image with black margins;
    **Fill frame** crops it to fill the frame. Preview framing guides are editing aids.
@@ -18,7 +20,11 @@ The editor is experimental; read the [support and limits](support.md) before a l
    a visual fade does not mute the underlying original audio.
 5. Put the playhead where sound should start and choose **Add audio**. Files
    selected together start there on separate, parallel tracks. Adjust each track's
-   volume in **Audio levels**. The timeline shows where tracks end.
+   volume in **Audio levels**. Select an audio block or choose **Edit audio** for
+   its start time, trims and volume. **Move audio to playhead** places it at the
+   current time. Drag a block horizontally, or focus it and use Left/Right (0.1s),
+   Shift+Left/Right (1s), or Home (start). Each overlapping track has its own lane.
+   Trims keep the source file and apply equally to preview, saved projects and export.
 6. Use **Original video sound** to turn all original clip sound on/off, or choose
    a clip and change **Original clip sound** and **Original clip volume**.
 

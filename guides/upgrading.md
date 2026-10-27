@@ -4,11 +4,13 @@ Before an upgrade, choose **Save project**, verify the JSON file reached your
 downloads or host, and keep the original source media. Keep a copy of that JSON
 before resaving it in a newer editor.
 
-Current projects write format version 2. Unversioned RED VOX drafts and version 1
+Current projects write format version 3, including standalone audio trims.
+Unversioned RED VOX drafts and version 1/2
 projects remain readable. The old product name in a legacy file does not make it
 invalid. A loaded project keeps its chosen basename when saved; unsafe filename
-characters are sanitized. Existing machine identifiers and 2.x readers remain
-compatible. The visible ClipBraid name does not require renaming your files.
+characters are sanitized. Older builds that read only versions 1/2 reject format 3;
+use a pre-upgrade backup with those builds. This prevents audio trims from being
+silently lost. The visible ClipBraid name does not require renaming your files.
 
 Open an older project with **Open project**, check clips and sound choices,
 then save a new copy. Invalid or unsupported project files are rejected while

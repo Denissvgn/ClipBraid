@@ -1,7 +1,7 @@
 import type { MediaAsset, AudioFragment, VisualFilter } from "../types";
 
 /** Current on-disk schema. Format identity is the schema, not the display name. */
-export const PROJECT_SCHEMA_VERSION = 2;
+export const PROJECT_SCHEMA_VERSION = 3;
 /** Maximum accepted project document size in bytes (256 MiB). */
 export const MAX_PROJECT_BYTES = 256 * 1024 * 1024;
 /** Maximum accepted decoded media payload size in bytes (256 MiB). */
@@ -83,7 +83,8 @@ function optionalNumber(
 }
 
 // Unversioned documents are the original RED VOX draft format; version 1 uses
-// the same fields without configured gains. Version 2 adds optional gains.
+// the same fields without configured gains. Version 2 adds optional gains;
+// version 3 adds selected source windows for standalone audio.
 // Migration stamps the version and rebuilds missing or
 // empty media references from the entry ID (legacy drafts could persist an
 // empty reference; the payload itself is authoritative). Source media, trims,
@@ -95,8 +96,7 @@ export function migrateProjectDocument(
   const data = record(value);
   const version = data.schemaVersion;
   if (version === PROJECT_SCHEMA_VERSION) return data;
-  if (version === 1) return { ...data, schemaVersion: PROJECT_SCHEMA_VERSION };
-  if (version !== undefined)
+  if (version !== undefined && version !== 1 && version !== 2)
     throw new Error(
       `Unsupported project version ${JSON.stringify(version) ?? "unknown"}; ` +
         `this build reads unversioned drafts and versions 1–${PROJECT_SCHEMA_VERSION}. The file was not modified.`,
@@ -105,8 +105,16 @@ export function migrateProjectDocument(
     ...data,
     schemaVersion: PROJECT_SCHEMA_VERSION,
   };
+  // Earlier readers ignored these audio fields. Preserve their audible window,
+  // rather than activating unknown extension data as a newly meaningful trim.
+  if(Array.isArray(data.audioTracks))migrated.audioTracks=data.audioTracks.map(entry=>{
+    if(!entry||typeof entry!=="object"||Array.isArray(entry))return entry;
+    const {originalDuration,trimStart,trimEnd,...legacy}=entry as Record<string,unknown>;
+    return legacy;
+  });
+  if(version!==undefined)return migrated;
   for (const key of ["mediaAssets", "audioTracks"]) {
-    const entries = data[key];
+    const entries = migrated[key];
     if (!Array.isArray(entries)) continue;
     migrated[key] = entries.map((entry) => {
       if (!entry || typeof entry !== "object" || Array.isArray(entry))
@@ -233,7 +241,12 @@ function validateMetadata(data: Record<string, unknown>, resolveSource: (item: R
   });
   const audioTracks: AudioFragment[] = audio.map((value) => {
     const { item, ...base } = common(value);
-    return base;
+    if(item.originalDuration===undefined&&item.trimStart===undefined&&item.trimEnd===undefined)return base;
+    const originalDuration=number(item.originalDuration??base.duration,"original audio duration",Number.MIN_VALUE);
+    const trimStart=number(item.trimStart??0,"audio trim start"),trimEnd=number(item.trimEnd??0,"audio trim end");
+    if(trimStart+trimEnd>=originalDuration||Math.abs(originalDuration-trimStart-trimEnd-base.duration)>1e-6)
+      throw new Error("Audio trim and duration do not match the selected source interval.");
+    return {...base,originalDuration,trimStart,trimEnd};
   });
   // Each start/duration is bounded above, so a valid interval can end as late
   // as twice that bound. Seeking to that end must remain saveable.
@@ -280,7 +293,7 @@ export interface ProjectSnapshot {
  * Deterministic project serialization. Base64 media payloads are produced
  * here — the required transport boundary — from the immutable source bytes;
  * runtime state itself holds only Blob handles and source IDs. The emitted
- * field set is the version 2 format and stays identical across round trips.
+ * field set is the version 3 format and stays identical across round trips.
  */
 export async function serializeProject(
   state: ProjectSnapshot,
@@ -322,6 +335,7 @@ export async function serializeProject(
       name: track.name,
       startTime: track.startTime,
       duration: track.duration,
+      ...(track.originalDuration===undefined?{}:{originalDuration:track.originalDuration,trimStart:track.trimStart??0,trimEnd:track.trimEnd??0}),
       ...(track.gain === undefined ? {} : { gain: track.gain }),
     });
   }

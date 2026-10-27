@@ -75,7 +75,7 @@ test("overload is explicit and lower volume survives save and local recovery bef
   expect(await (await received).failure()).toBeNull();
   await expect(page.locator('[data-autosave-status="saved"]')).toBeVisible();
   const saved = await saveDraft(page);
-  expect(saved.schemaVersion).toBe(2); expect(saved.audioTracks[0].gain).toBe(0.5);
+  expect(saved.schemaVersion).toBe(3); expect(saved.audioTracks[0].gain).toBe(0.5);
   await page.reload(); await page.getByRole("button", { name: "Start editing" }).click();
   await page.getByRole("button", { name: "Restore local revision", exact: true }).click();
   await expect(page.getByRole("slider", { name: "Volume for audio 1: overload.wav", exact: true })).toHaveValue("50");

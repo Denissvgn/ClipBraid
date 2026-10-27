@@ -8,7 +8,7 @@ import { createQualificationRun, archiveQualification } from './qualification-ev
 
 // One gate at a time, with private evidence even when a child fails or times out.
 const gates = [['check:toolchain',30000], ['typecheck',60000], ['check:mcp',60000], ['test:unit',120000],
-  ['build',120000], ['check:build-isolation',120000], ['check:style-isolation',120000], ['check:artifacts',30000], ['test:diagnostic',60000], ['test:browser',1150000], ['test:production',120000]];
+  ['build',120000], ['check:build-isolation',120000], ['check:style-isolation',120000], ['check:artifacts',30000], ['test:diagnostic',60000], ['test:browser',1390000], ['test:production',120000]];
 const directory = 'reports/qualification';
 const reportFiles=['reports/toolchain.json','reports/build-artifacts.json','reports/build-isolation.json','reports/style-isolation.json','reports/diagnostic-cli-test.json','reports/browser-manifest.json','reports/browser-results.json','reports/production-results.json'];
 async function qualify(){

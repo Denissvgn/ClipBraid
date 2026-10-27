@@ -15,12 +15,14 @@ import {
   parseProject,
   serializeProject,
   validateProjectMetadata,
+  MAX_TIMELINE_SECONDS,
   type ProjectSnapshot,
 } from "./services/project";
 import { MediaSourceStore, type SourceLease } from "./services/mediaSources";
 import { ProjectWork, type ProjectWorkUnit } from "./services/projectWork";
 import { EditHistory, type ProjectContent } from "./services/editHistory";
 import { PlaybackClock } from "./services/playbackClock";
+import {moveAudio,trimAudio,resizeImage} from "./services/editing";
 import { ExportJobs } from "./services/exportJob";
 import { runExportPipeline } from "./services/exportPipeline";
 import { ProxyQueue } from "./services/proxyQueue";
@@ -48,6 +50,8 @@ import { MediaAsset, AudioFragment, VisualFilter } from "./types";
 import { Timeline } from "./components/Timeline";
 import { MediaPreview } from "./components/MediaPreview";
 import { AudioEngine } from "./components/AudioEngine";
+import { AudioSettings } from "./components/AudioSettings";
+import { TimeInput } from "./components/TimeInput";
 import { IntroModal } from "./components/IntroModal";
 import { JournalViewer } from "./components/JournalViewer";
 import { ExportFeedback } from "./components/ExportFeedback";
@@ -207,6 +211,10 @@ export default function App() {
   const [zoom, setZoom] = useState(40);
   const [status, setStatus] = useState("BOOTING...");
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  const [selectedAudioId,setSelectedAudioId]=useState<string|null>(null);
+  const audioCloseRef=useRef<HTMLButtonElement>(null);
+  const audioTriggerRef=useRef<HTMLElement|null>(null);
+  const audioReturnRef=useRef<string|null>(null);
 
   // Export states
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
@@ -232,18 +240,35 @@ export default function App() {
   const audioSettingsRef = useRef<HTMLElement>(null);
   const [focusAudioSettings, setFocusAudioSettings] = useState(false);
   useEffect(() => {
-    if (!focusAudioSettings || selectedAssetId || isTheaterMode || !audioSettingsRef.current) return;
+    if (!focusAudioSettings || selectedAssetId || selectedAudioId || isTheaterMode || !audioSettingsRef.current) return;
     const control = audioSettingsRef.current.querySelector<HTMLInputElement>('input[type="range"]') ?? audioSettingsRef.current;
     control.focus(); control.scrollIntoView({ block: "center", inline: "nearest" }); setFocusAudioSettings(false);
-  }, [focusAudioSettings, selectedAssetId, isTheaterMode]);
+  }, [focusAudioSettings, selectedAssetId, selectedAudioId, isTheaterMode]);
   useEffect(() => {
     if (selectedAssetId && !isTheaterMode) clipSettingsCloseRef.current?.focus();
   }, [selectedAssetId, isTheaterMode]);
+  useEffect(()=>{if(selectedAudioId&&!isTheaterMode)audioCloseRef.current?.focus()},[selectedAudioId,isTheaterMode]);
+  useEffect(()=>{
+    if(selectedAudioId||isTheaterMode||!audioReturnRef.current)return;
+    const id=audioReturnRef.current;audioReturnRef.current=null;
+    const opener=[...document.querySelectorAll<HTMLButtonElement>('[data-audio-edit]')].find(button=>button.dataset.audioEdit===id);
+    if(opener)opener.focus();else setFocusAudioSettings(true);
+  },[selectedAudioId,isTheaterMode]);
   const selectClip = (id: string) => {
     clipTriggerRef.current = document.activeElement as HTMLElement | null;
     setIsTheaterMode(false);
     setSelectedAssetId(id);
+    setSelectedAudioId(null);
     if (id === selectedAssetId && !isTheaterMode) clipSettingsCloseRef.current?.focus();
+  };
+  const selectAudio=(id:string)=>{
+    audioTriggerRef.current=document.activeElement as HTMLElement|null;
+    setIsTheaterMode(false);setSelectedAssetId(null);setSelectedAudioId(id);
+    if(id===selectedAudioId&&!isTheaterMode)audioCloseRef.current?.focus();
+  };
+  const closeAudioSettings=()=>{
+    setSelectedAudioId(null);
+    if(audioTriggerRef.current?.isConnected)audioTriggerRef.current.focus();else audioReturnRef.current=selectedAudioId;
   };
   const closeClipSettings = () => {
     setSelectedAssetId(null);
@@ -512,6 +537,7 @@ export default function App() {
           name: selected.name,
           startTime: currentTime,
           duration,
+          originalDuration:duration,trimStart:0,trimEnd:0,
         },
       ]);
       work.commit();
@@ -564,6 +590,7 @@ export default function App() {
           name: file.name,
           startTime,
           duration,
+          originalDuration:duration,trimStart:0,trimEnd:0,
         });
       }
       work.check(); staged.forEach((track) => tx.pin(track.sourceId));
@@ -623,6 +650,7 @@ export default function App() {
           name: `VOICE_${timeStr}`,
           startTime: currentTime,
           duration: audio.durationMs / 1000,
+          originalDuration:audio.durationMs/1000,trimStart:0,trimEnd:0,
         },
       ]);
       work.commit();
@@ -692,13 +720,15 @@ export default function App() {
     const track = cleanupRef.current.audioTracks.find((t) => t.id === id);
     if (track) logEvent("info", `Audio track removed: ${track.name}`);
     setAudioTracks((prev) => prev.filter((t) => t.id !== id));
-  }, []);
+    if(selectedAudioId===id){setSelectedAudioId(null);setFocusAudioSettings(true)}
+  }, [selectedAudioId]);
   const travelHistory = useCallback((direction: "undo" | "redo") => {
     if (exportJobs.getSnapshot().active || isRecording || !editHistory.getSnapshot()[direction === "undo" ? "canUndo" : "canRedo"]) return;
     projectWork.invalidate();setIsPlaying(false);editHistory[direction]();setSeekRevision(value=>value+1);
     const next=editHistory.getSnapshot().project;
     setCurrentTime(time=>clampPlayhead(time,projectDuration(next.mediaAssets,next.audioTracks)));
     setSelectedAssetId(id=>next.mediaAssets.some(asset=>asset.id===id)?id:null);
+    setSelectedAudioId(id=>next.audioTracks.some(track=>track.id===id)?id:null);
   }, [editHistory,exportJobs,isRecording,projectWork]);
   useEffect(() => {
     const warn=(event:BeforeUnloadEvent)=>{if(editHistory.getSnapshot().dirty && recoveryStateRef.current.status!=="saved"){event.preventDefault();event.returnValue=""}};
@@ -871,6 +901,7 @@ export default function App() {
       recordingEpoch.current++; recordingRef.current?.cancel.abort();
       setIsPlaying(false);
       setSelectedAssetId(null);
+      setSelectedAudioId(null);
       setPendingProject(null);
       editHistory.reset({ mediaAssets: restoredMedia, audioTracks: restoredAudio,
         aspectRatio: data.aspectRatio, fitMode: data.fitMode, transitionDuration: data.transitionDuration }, !options.ui);
@@ -1051,6 +1082,10 @@ export default function App() {
     () => mediaAssets.find((m) => m.id === selectedAssetId),
     [mediaAssets, selectedAssetId],
   );
+  const selectedAudio=audioTracks.find(track=>track.id===selectedAudioId);
+  const changeAudio=(id:string,label:string,change:(track:AudioFragment)=>AudioFragment)=>
+    setAudioTracks(tracks=>tracks.map(track=>track.id===id?change(track):track),label);
+  const moveAudioTrack=(id:string,time:number)=>changeAudio(id,"Move audio",track=>moveAudio(track,time));
   // Originals stay authoritative. Proxy generation returns only with
   // provide separate, cancellable storage; never rewrite imported bytes in idle time.
   const handleExport = () => {
@@ -1074,7 +1109,7 @@ export default function App() {
     if (!failedSource || !failedSourcePresent) return;
     exportJobs.dismissFailure();
     if (failedSource.kind === "audio") {
-      setIsTheaterMode(false); setSelectedAssetId(null);
+      setIsTheaterMode(false); setSelectedAssetId(null);setSelectedAudioId(null);
       const row = [...(timelineContainerRef.current?.querySelectorAll<HTMLElement>("[data-audio-track]") ?? [])].find(element => element.dataset.audioTrack === failedSource.id);
       const control = row?.querySelector<HTMLButtonElement>("button");
       control?.focus(); control?.scrollIntoView({ block: "center", inline: "nearest" });
@@ -1295,7 +1330,7 @@ export default function App() {
               onCancel={exportJobs.cancel} onRetry={handleExport} onClose={exportJobs.dismissFailure}
               onSaveProject={() => void handleSaveProject()}
               onInspect={failedSourcePresent ? inspectFailedSource : undefined}
-              onReviewAudio={() => { exportJobs.dismissFailure(); setIsTheaterMode(false); setSelectedAssetId(null); setFocusAudioSettings(true); }}
+              onReviewAudio={() => { exportJobs.dismissFailure(); setIsTheaterMode(false); setSelectedAssetId(null);setSelectedAudioId(null); setFocusAudioSettings(true); }}
             />}
           </div>
           <label className="playhead-control">
@@ -1378,7 +1413,7 @@ export default function App() {
         {!isTheaterMode && (
           <aside
             className="editor-inspector"
-            aria-label={selectedAsset ? "Clip settings" : "Project settings"}
+            aria-label={selectedAsset ? "Clip settings" : selectedAudio ? "Audio settings" : "Project settings"}
           >
             {selectedAsset ? (
               <>
@@ -1408,6 +1443,8 @@ export default function App() {
                     </span>
                   </div>
                 </div>
+                {selectedAsset.type === "image"&&<TimeInput label="Photo duration (seconds)" value={selectedAsset.duration} min={.1} max={MAX_TIMELINE_SECONDS}
+                  onCommit={duration=>setMediaAssets(assets=>sequenceMediaStartTimes(assets.map(asset=>asset.id===selectedAsset.id?resizeImage(asset,duration):asset),transitionDuration),"Change photo duration")} />}
                 {selectedAsset.type === "video" && (
                   <section className="inspector-section">
                     {selectedAsset.normalized && <p className="helper-text">This legacy draft may use a reduced source. Relink an original when available.</p>}
@@ -1569,6 +1606,12 @@ export default function App() {
                   Remove clip
                 </button>
               </>
+            ) : selectedAudio ? (
+              <AudioSettings track={selectedAudio} currentTime={currentTime} closeRef={audioCloseRef}
+                onClose={closeAudioSettings} onRemove={()=>handleDeleteAudio(selectedAudio.id)}
+                onMove={time=>moveAudioTrack(selectedAudio.id,time)}
+                onTrim={change=>changeAudio(selectedAudio.id,"Trim audio",track=>trimAudio(track,change))}
+                onGain={gain=>changeAudio(selectedAudio.id,"Change audio volume",track=>({...track,gain}))} />
             ) : (
               <>
                 <div className="inspector-heading">
@@ -1599,7 +1642,7 @@ export default function App() {
                     <Icon name="right" size={14} />
                   </button>
                   {audioTracks.map((track, index) => (
-                    <label className="track-volume" key={track.id}>
+                    <div className="track-level" key={track.id}><label className="track-volume">
                       <span>{track.name} · {Math.round(trackGain(track) * 100)}%</span>
                       <input type="range" min="0" max="100" step="1"
                         aria-label={`Volume for audio ${index + 1}: ${track.name}`}
@@ -1608,7 +1651,7 @@ export default function App() {
                           const gain = Number(event.target.value) / 100;
                           setAudioTracks(previous => previous.map(value => value.id === track.id ? { ...value, gain } : value));
                         }} />
-                    </label>
+                    </label><button className="text-button" data-audio-edit={track.id} onClick={()=>selectAudio(track.id)}>Edit audio {index+1}</button></div>
                   ))}
                 </section>
                 <section className="inspector-section">
@@ -1778,17 +1821,23 @@ export default function App() {
           </label>
         </div>
         <Timeline
+          key={editHistory.generation}
           mediaAssets={mediaAssets}
           audioTracks={audioTracks}
           currentTime={currentTime}
           zoom={zoom}
           selectedAssetId={selectedAssetId}
+          selectedAudioId={selectedAudioId}
           onSeek={seekTo}
           onDeleteMedia={handleDeleteMedia}
           onDeleteAudio={handleDeleteAudio}
           onMoveMedia={handleMoveMedia}
           onToggleMute={handleToggleMute}
           onSelectAsset={selectClip}
+          onSelectAudio={selectAudio}
+          onMoveAudio={moveAudioTrack}
+          onBeginAudioMove={()=>{editHistory.beginGroup(true);setIsPlaying(false)}}
+          onEndAudioMove={()=>editHistory.endGroup()}
         />
       </section>
       <footer className="editor-statusbar">

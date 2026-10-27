@@ -1,7 +1,7 @@
 import { Input, BlobSource, ALL_FORMATS, VideoSampleSink, AudioSampleSink } from "mediabunny";
 import { registerAc3Decoder } from "@mediabunny/ac3";
 import type { MediaAsset, AudioFragment } from "../types";
-import { sourceWindow } from "./timeline";
+import { audioSourceWindow, sourceWindow } from "./timeline";
 import { trackGain } from "./mixing";
 registerAc3Decoder();
 export interface AssetInventory {
@@ -62,7 +62,12 @@ export async function probeAsset(asset: MediaAsset | AudioFragment, blob: Blob):
       const required = trackGain(asset) > 0 && (kind === "audio" || !(asset as MediaAsset).muted);
       if (required) {
         if (!decodable) throw new Error("Unsupported audio codec.");
-        const start = kind === "video" ? (asset as MediaAsset).trimStart : 0, end = Math.min(endTimestamp, start + asset.duration);
+        const start = kind === "video" ? (asset as MediaAsset).trimStart : audioSourceWindow(asset as AudioFragment).start;
+        const selectedEnd=start+asset.duration;
+        if(kind==="audio"&&"originalDuration" in asset&&asset.originalDuration!==undefined&&selectedEnd>endTimestamp+.05)
+          throw new Error("Selected audio interval exceeds the decoded source duration.");
+        if(kind==="audio"&&start>=endTimestamp)throw new Error("Selected audio interval has no source samples.");
+        const end = Math.min(endTimestamp, selectedEnd);
         if (end > Math.max(start, firstTimestamp)) {
           const samples = new AudioSampleSink(audio).samplesAtTimestamps([Math.max(start, firstTimestamp), Math.max(start, end - 0.05)]);
           try { for await (const sample of samples) { if (!sample) throw new Error("No decoded audio in the selected interval."); sample.close(); } }

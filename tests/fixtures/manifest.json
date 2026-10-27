@@ -63,6 +63,10 @@
     "bytes": 1270,
     "sha256": "525aca0f84d4e234e547f3318a320c91e393aed0469de55de74267f8bc9b6efa"
   },
+  "drafts/legacy-unversioned.v3.json": {
+    "bytes": 1270,
+    "sha256": "b7a57fd726dac0720648485ff4fc52c9c93648c2f95e09ec02e99f1863cb4291"
+  },
   "silent-video.mp4": {
     "bytes": 1832,
     "sha256": "36daf9d60d0475784eeee73a7d34e7cfaa13d7cf51c05e2a18bb6e7d8311ad50"

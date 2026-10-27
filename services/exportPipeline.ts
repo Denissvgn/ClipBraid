@@ -11,7 +11,7 @@ import { Flow } from "../platform";
 import { ffmpegService } from "./ffmpegService";
 import { scheduleAudioChunk, combineAudioChunks, type AudioSelection } from "./audio";
 import { activeIntervals, canvasFit, createOpacitySampler, estimateExport, exportFrameRate, frameCount,
-  frameTimestamp, intervalsOverlap, sourceTimeAt, sourceWindow } from "./timeline";
+  audioSourceWindow, frameTimestamp, intervalsOverlap, sourceTimeAt, sourceWindow } from "./timeline";
 import { logEvent as sysLog } from "./journalService";
 import { BRAND } from "./brand";
 import type { MediaAsset, VisualFilter } from "../types";
@@ -151,7 +151,8 @@ export async function runExportPipeline(snapshot: ExportSnapshot, context: Expor
           }
           for (const track of audioTracks) {
             if (trackGain(track) === 0) continue;
-            await mixSource(track.sourceId, track.name, { sourceStart: 0, sourceEnd: track.duration,
+            const window=audioSourceWindow(track);
+            await mixSource(track.sourceId, track.name, { sourceStart: window.start, sourceEnd: Math.min(window.end,window.start+track.duration),
               timelineStart: track.startTime - offset, timelineEnd: windowEnd }, trackGain(track), false, track.id);
           }
           signal?.throwIfAborted();

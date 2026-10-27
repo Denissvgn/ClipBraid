@@ -3,7 +3,7 @@ export const REQUIRED_BROWSER_SPECS = [
   'delivery.spec.mjs', 'diagnostic-history.spec.mjs', 'diagnostics.spec.mjs', 'edit-history.spec.mjs', 'encoder-plan.spec.mjs', 'export-feedback.spec.mjs', 'export-size.spec.mjs', 'export.spec.mjs',
   'fidelity.spec.mjs', 'identity.spec.mjs', 'keyboard.spec.mjs', 'mix-levels.spec.mjs', 'originals.spec.mjs', 'playback.spec.mjs',
   'preflight.spec.mjs', 'product-language.spec.mjs', 'project-schema.spec.mjs', 'project-transaction.spec.mjs',
-  'proxies.spec.mjs', 'recovery.spec.mjs', 'regressions.spec.mjs', 'review.spec.mjs', 'sources.spec.mjs', 'usability.spec.mjs', 'worker-startup.spec.mjs',
+  'proxies.spec.mjs', 'recovery.spec.mjs', 'regressions.spec.mjs', 'review.spec.mjs', 'sources.spec.mjs', 'timeline-editing.spec.mjs', 'usability.spec.mjs', 'worker-startup.spec.mjs',
 ];
 export const REQUIRED_PRODUCTION_TESTS = [
   'the served production candidate matches the source identity and every emitted asset hash',

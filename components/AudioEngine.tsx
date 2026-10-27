@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useMemo, memo } from "react";
 import { AudioFragment, MediaAsset } from "../types";
-import { intervalsOverlap, isIntervalActive, sourceTimeAt } from "../services/timeline";
+import { audioSourceTimeAt, audioSourceWindow, intervalsOverlap, isIntervalActive, sourceTimeAt } from "../services/timeline";
 import { clipHasSound, mixPolicy, trackGain } from "../services/mixing";
 interface AudioEngineProps {
     audioTracks: AudioFragment[];
@@ -161,7 +161,7 @@ export const AudioEngine = memo(({ audioTracks = [], mediaAssets = [], sourceUrl
                 if (Math.abs(audio.volume - volume) > 1e-6)
                     audio.volume = volume;
                 const isWithinRange = isIntervalActive(track, sampleTime);
-                sync(track.id, audio, isWithinRange, sampleTime - track.startTime, track.startTime);
+                sync(track.id, audio, isWithinRange, audioSourceTimeAt(track,sampleTime), track.startTime,audioSourceWindow(track).start);
             });
             // Sync video clip audio
             mediaAssets.forEach((asset) => {

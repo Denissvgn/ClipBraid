@@ -9,7 +9,7 @@ from pathlib import Path
 import subprocess, struct, wave, math, zlib, json, hashlib
 import tempfile, shutil, os
 
-STATIC_DRAFTS = ('legacy-unversioned.json', 'legacy-unversioned.migrated.json', 'legacy-unversioned.v2.json')
+STATIC_DRAFTS = ('legacy-unversioned.json', 'legacy-unversioned.migrated.json', 'legacy-unversioned.v2.json', 'legacy-unversioned.v3.json')
 
 def generate(root):
     def ff(*args):

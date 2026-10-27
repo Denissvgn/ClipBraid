@@ -9,7 +9,7 @@ test("project and video actions produce distinct files and explain the delivery 
   await loadDraft(page,draft([await asset("landscape-red.png")]));
   const projectReady=page.waitForEvent("download");await page.getByTitle("Save Project",{exact:true}).click();const project=await projectReady;
   expect(project.suggestedFilename()).toMatch(/\.json$/);const chunks=[];for await(const chunk of await project.createReadStream())chunks.push(chunk);
-  const editable=JSON.parse(Buffer.concat(chunks).toString());expect(editable.mediaAssets).toHaveLength(1);expect(editable.schemaVersion).toBe(2);
+  const editable=JSON.parse(Buffer.concat(chunks).toString());expect(editable.mediaAssets).toHaveLength(1);expect(editable.schemaVersion).toBe(3);
   await page.getByRole("button",{name:"draft",exact:true}).click();
   const info=page.getByText("Export profile details",{exact:true});
   await expect(page.getByText(/Estimated base64 handoff/)).not.toBeVisible();await info.click();await expect(page.getByText(/Estimated base64 handoff/)).toBeVisible();
