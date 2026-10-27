@@ -26,6 +26,8 @@ import {
   Volume2,
   VolumeX,
   X,
+  Undo2,
+  Redo2,
 } from "lucide-react";
 const icons = {
   audio: AudioLines,
@@ -54,6 +56,8 @@ const icons = {
   volume: Volume2,
   mute: VolumeX,
   close: X,
+  undo: Undo2,
+  redo: Redo2,
 };
 export type IconName = keyof typeof icons;
 export function Icon({ name, size = 18 }: { name: IconName; size?: number }) {

@@ -4,7 +4,5 @@ declare module '*?raw' {
 }
 
 declare const __DEV_AUTOMATION__: boolean;
-declare module 'virtual:development-journal' {
-  const content: string;
-  export default content;
-}
+declare const __BUILD_ID__: string;
+declare const __APP_VERSION__: string;

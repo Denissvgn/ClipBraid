@@ -1,9 +1,6 @@
 #!/usr/bin/env node
 // ClipBraid MCP server: journal + system state for agents. stdio transport.
 // Run: `npm run mcp`. Read-only except journal_append.
-import { readFile, writeFile, stat, mkdir } from "node:fs/promises";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -14,38 +11,24 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   parseJournal,
-  insertEntry,
-  exportVerdict,
+  exportStatus,
+  reportStatus,
   LOG_NAMES,
+  LEGACY_LOG_NAMES,
   LOG_ALLOWLIST,
 } from "./lib.js";
-import { TOOLS } from "./tools.js";
+import { TOOLS, validateArguments } from "./tools.js";
+import { appendJournal, readJournal, readBounded, readExportLog, MAX_LOG_BYTES } from "./storage.js";
+import { sanitizeReport } from "../services/reportPolicy.mjs";
+import { createProjectState } from "./projectState.js";
 
-const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const JOURNAL = path.join(ROOT, "reports", "development", "JOURNAL.md");
-async function readJournal() {
-  try {
-    return await readFile(JOURNAL, "utf8");
-  } catch (error) {
-    if (error.code === "ENOENT")
-      return "# ClipBraid development journal\n\n---\n";
-    throw error;
-  }
-}
+const TIME_ZONE = process.env.CLIPBRAID_TIME_ZONE || "Europe/Moscow";
+new Intl.DateTimeFormat("en", { timeZone: TIME_ZONE }); // Reject invalid configuration before accepting writes.
 const text = (t) => ({ content: [{ type: "text", text: t }] });
 const err = (t) => ({ content: [{ type: "text", text: t }], isError: true });
-async function git(args) {
-  try {
-    const { stdout } = await execFileAsync("git", args, {
-      cwd: ROOT,
-      timeout: 15000,
-    });
-    return stdout.trim();
-  } catch (e) {
-    return `error: ${e.message.slice(0, 200)}`;
-  }
-}
+const projectState = createProjectState(ROOT);
 
 const server = new Server(
   { name: "clipbraid-journal", version: "1.0.0" },
@@ -55,9 +38,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: TOOLS,
 }));
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args = {} } = request.params;
+  try {
+  const { name, arguments: raw = {} } = request.params;
+  const args = validateArguments(name, raw);
   if (name === "journal_read") {
-    const md = await readJournal();
+    const md = await readJournal(JOURNAL, ROOT);
     let entries = parseJournal(md);
     if (args.query) {
       const q = String(args.query).toLowerCase();
@@ -68,82 +53,41 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     return text(
       JSON.stringify(
-        entries.slice(0, Math.min(Number(args.limit ?? 5), 50)),
+        entries.slice(0, args.limit ?? 5),
         null,
         2,
       ),
     );
   }
   if (name === "journal_append") {
-    const md = await readJournal();
-    await mkdir(path.dirname(JOURNAL), { recursive: true });
-    await writeFile(
-      JOURNAL,
-      insertEntry(md, String(args.title), String(args.body)),
-      "utf8",
-    );
+    await appendJournal(JOURNAL, args.title, args.body, TIME_ZONE, ROOT);
     return text(`appended entry "${args.title}"`);
   }
-  if (name === "project_state") {
-    const [head, status, branch] = await Promise.all([
-      git(["log", "--oneline", "-5"]),
-      git(["status", "--short"]),
-      git(["branch", "--show-current"]),
-    ]);
-    let tsc = "clean";
-    try {
-      await execFileAsync("npx", ["tsc", "--noEmit"], {
-        cwd: ROOT,
-        timeout: 120000,
-      });
-    } catch (e) {
-      tsc = String(e.stdout ?? e.message).slice(0, 500);
-    }
-    const mtime = async (p) =>
-      (await stat(p).catch(() => null))?.mtime?.toISOString() ?? "missing";
-    let preview = "unknown";
-    try {
-      const r = await fetch("http://localhost:4173/", {
-        signal: AbortSignal.timeout(8000),
-      });
-      preview = `HTTP ${r.status}`;
-    } catch (e) {
-      preview = `down: ${String(e.cause ?? e.message).slice(0, 80)}`;
-    }
-    return text(
-      JSON.stringify(
-        {
-          branch,
-          head: head.split("\n"),
-          dirty: status || "(clean)",
-          tsc,
-          appTsxMtime: await mtime(path.join(ROOT, "App.tsx")),
-          distMtime: await mtime(path.join(ROOT, "dist", "index.html")),
-          preview4173: preview,
-        },
-        null,
-        2,
-      ),
-    );
-  }
+  if (name === "project_state") return text(JSON.stringify(await projectState(), null, 2));
   const file = LOG_NAMES[args.name];
   if (
     (name === "export_logs" || name === "e2e_status") &&
     file &&
     LOG_ALLOWLIST.has(file)
   ) {
-    const logText = await readFile(file, "utf8").catch(() => "");
-    if (!logText) return text(`log "${args.name}" is empty or missing`);
+    const result = args.name === "latest" ? { ...await readBounded(path.resolve(ROOT, file), MAX_LOG_BYTES, false, ROOT), legacyFallback: false }
+      : await readExportLog(path.resolve(ROOT, file), LEGACY_LOG_NAMES[args.name], ROOT);
+    const { legacyFallback } = result;
+    const { text: logText, mtimeMs, truncated } = result;
+    let summary = null;
+    if (args.name === "latest") try { summary = sanitizeReport(JSON.parse(logText)); } catch { /* Invalid input is unknown; never return its raw fields. */ }
     if (name === "export_logs") {
-      const n = Math.min(Number(args.lines ?? 20), 100);
-      return text(logText.trim().split("\n").slice(-n).join("\n"));
+      if (args.name === "latest") return summary ? text(JSON.stringify(summary)) : err("Invalid or missing job summary.");
+      return text(logText ? logText.trim().split("\n").slice(-(args.lines ?? 20)).join("\n") : "Log is empty or missing.");
     }
     const threadLines = logText.split("\n").filter((l) => /Thread \d/.test(l));
     return text(
       JSON.stringify(
         {
           log: args.name,
-          verdict: exportVerdict(logText),
+          ...(args.name === "latest" ? reportStatus(summary) : exportStatus(logText, { mtimeMs })),
+          legacyFallback,
+          truncated,
           lastProgress: threadLines.slice(-4),
           pageErrors: /PAGEERRORS:\s*(\[.*\])/.exec(logText)?.[1] ?? "n/a",
         },
@@ -158,5 +102,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     );
   }
   return err(`unknown tool "${name}"`);
+  } catch (error) { return err(String(error.message ?? error).slice(0, 500)); }
 });
 await server.connect(new StdioServerTransport());

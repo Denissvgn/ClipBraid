@@ -4,14 +4,43 @@ import React, {
   useCallback,
   useRef,
   useMemo,
+  useSyncExternalStore,
 } from "react";
-import { Flow } from "./platform";
-import { parseProject } from "./services/project";
+import { Flow, audioFileType } from "./platform";
+import { platformFailure } from "./services/platformError";
+import { recordedDuration } from "./services/audioDuration";
+import { sourceHasAudio } from "./services/sourceAudio";
 import {
-  projectDuration,
-  createOpacitySampler,
-  exportFrameRate,
+  assertProjectSize,
+  parseProject,
+  serializeProject,
+  validateProjectMetadata,
+  MAX_TIMELINE_SECONDS,
+  type ProjectSnapshot,
+} from "./services/project";
+import { MediaSourceStore, type SourceLease } from "./services/mediaSources";
+import { ProjectWork, type ProjectWorkUnit } from "./services/projectWork";
+import { EditHistory, type ProjectContent } from "./services/editHistory";
+import { PlaybackClock } from "./services/playbackClock";
+import {moveAudio,trimAudio,resizeImage} from "./services/editing";
+import { ExportJobs } from "./services/exportJob";
+import { runExportPipeline } from "./services/exportPipeline";
+import { ProxyQueue } from "./services/proxyQueue";
+import { renderProxy } from "./services/proxyRenderer";
+import { useProjectRecovery } from "./components/useProjectRecovery";
+import { ProjectOpenPrompt } from "./components/ProjectOpenPrompt";
+import type { RecoveryData } from "./services/recovery";
+import { mixPolicy, trackGain } from "./services/mixing";
+import { BUILD_ID } from "./services/buildIdentity";
+import { BRAND, defaultProjectFilename } from "./services/brand";
+import { normalizeProjectFilename } from "./services/projectNames";
+import {
+  activeIntervals,
+  clampPlayhead,
   estimateExport,
+  projectDuration,
+  recalculateMediaStartTimes as sequenceMediaStartTimes,
+  trimmedDuration,
   type ExportQuality,
 } from "./services/timeline";
 import { BrandMark } from "./components/BrandMark";
@@ -21,36 +50,19 @@ import { MediaAsset, AudioFragment, VisualFilter } from "./types";
 import { Timeline } from "./components/Timeline";
 import { MediaPreview } from "./components/MediaPreview";
 import { AudioEngine } from "./components/AudioEngine";
+import { AudioSettings } from "./components/AudioSettings";
+import { TimeInput } from "./components/TimeInput";
 import { IntroModal } from "./components/IntroModal";
 import { JournalViewer } from "./components/JournalViewer";
+import { ExportFeedback } from "./components/ExportFeedback";
+import { mediaRecovery, mediaNoticeTitle } from "./services/exportFeedback";
+import { createJobReport } from "./services/diagnostics";
+import { useJobDiagnostics } from "./components/useJobDiagnostics";
 import {
-  parseJournal,
   logEvent,
   type SystemEventKind,
 } from "./services/journalService";
-// The development journal resolves to an empty module in every build.
-import journalMarkdown from "virtual:development-journal";
-import {
-  Input,
-  Output,
-  Mp4OutputFormat,
-  BufferTarget,
-  BlobSource,
-  ALL_FORMATS,
-  CanvasSource,
-  VideoSampleSource,
-  VideoSample,
-  VideoSampleSink,
-  AudioBufferSink,
-  canEncodeVideo,
-} from "mediabunny";
-import { registerAc3Decoder } from "@mediabunny/ac3";
-let encodersInitialized = false;
-async function initMediaCodecs() {
-  if (encodersInitialized) return;
-  registerAc3Decoder();
-  encodersInitialized = true;
-}
+import { Input, BlobSource, ALL_FORMATS } from "mediabunny";
 const base64ToUint8Array = (base64: string): Uint8Array<ArrayBuffer> => {
   try {
     const raw = base64.includes(",") ? base64.split(",")[1] : base64;
@@ -69,20 +81,22 @@ const base64ToUint8Array = (base64: string): Uint8Array<ArrayBuffer> => {
  *  (deduced from packet timestamps, not unreliable metadata) + native size
  *  (source metadata only; originals are never replaced). */
 const probeVideoSource = async (
-  blobUrl: string,
+  bytes: Blob,
+  signal?: AbortSignal,
 ): Promise<{
   hasAudio: boolean;
   fps: number;
   width: number;
   height: number;
 }> => {
-  const response = await fetch(blobUrl);
-  if (!response.ok) throw new Error("Cannot read the video source.");
   const input = new Input({
-    source: new BlobSource(await response.blob()),
+    source: new BlobSource(bytes),
     formats: ALL_FORMATS,
   });
+  const stop = () => input.dispose();
+  signal?.addEventListener("abort", stop, { once: true });
   try {
+    signal?.throwIfAborted();
     const video = await input.getPrimaryVideoTrack();
     if (!video) throw new Error("The selected file has no video track.");
     const fps = (
@@ -95,12 +109,14 @@ const probeVideoSource = async (
       height: await video.getCodedHeight(),
     };
   } finally {
+    signal?.removeEventListener("abort", stop);
     input.dispose();
   }
 };
 const probeDuration = (
   blobUrl: string,
   type: "image" | "video" | "audio",
+  signal?: AbortSignal,
 ): Promise<number> => {
   return new Promise((resolve, reject) => {
     const element = document.createElement(type === "image" ? "img" : type);
@@ -110,6 +126,7 @@ const probeDuration = (
     );
     const finish = (error?: Error, duration?: number) => {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
       element.onload = null;
       element.onerror = null;
       if (element instanceof HTMLMediaElement) {
@@ -120,6 +137,9 @@ const probeDuration = (
       if (error) reject(error);
       else resolve(duration!);
     };
+    const abort = () => finish(signal?.reason ?? new DOMException("Action cancelled", "AbortError"));
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) { abort(); return; }
     element.onerror = () => finish(new Error("Cannot read this media file."));
     if (element instanceof HTMLMediaElement) {
       element.preload = "metadata";
@@ -133,11 +153,30 @@ const probeDuration = (
     element.src = blobUrl;
   });
 };
-const createBlobUrl = (base64: string, mimeType: string) => {
+const base64ToBlob = (base64: string, mimeType: string): Blob => {
   const bytes = base64ToUint8Array(base64);
   if (!bytes.length) throw new Error("Empty media data.");
-  return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+  return new Blob([bytes], { type: mimeType });
 };
+const probeAudioDuration = async (blob: Blob, url: string, signal?: AbortSignal): Promise<number> => {
+  try { await probeDuration(url, "audio", signal); }
+  catch (error) {
+    // Streamable WebM recordings can omit duration metadata; inspect packets.
+    if (!(error instanceof Error) || error.message !== "Invalid media duration.") throw error;
+  }
+  return (await recordedDuration(blob, signal)) / 1000;
+};
+const readProjectText = (file: File, signal: AbortSignal): Promise<string> => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  const cleanup = () => { signal.removeEventListener("abort", abort); reader.onload = null; reader.onerror = null; reader.onabort = null; };
+  const abort = () => { cleanup(); reader.abort(); reject(signal.reason ?? new DOMException("Project load cancelled", "AbortError")); };
+  reader.onload = () => { cleanup(); resolve(String(reader.result)); };
+  reader.onerror = () => { const error = reader.error ?? new Error("Could not read project file."); cleanup(); reject(error); };
+  reader.onabort = abort;
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  else try { reader.readAsText(file); } catch (error) { cleanup(); reject(error); }
+});
 const blobToBase64 = (blob: Blob): Promise<string> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -146,85 +185,121 @@ const blobToBase64 = (blob: Blob): Promise<string> => {
     reader.readAsDataURL(blob);
   });
 };
-/**
- * Serializes an AudioBuffer to a 16-bit PCM WAV file.
- * Used because Android WebView has no WebCodecs AAC *encoder* — the mix is
- * encoded to AAC by ffmpeg.wasm instead (its software encoder is always there).
- */
-const audioBufferToWav = (buffer: AudioBuffer): Uint8Array<ArrayBuffer> => {
-  const numCh = Math.min(2, buffer.numberOfChannels);
-  const len = buffer.length;
-  const dataBytes = len * numCh * 2;
-  const bytes = new Uint8Array(44 + dataBytes);
-  const dv = new DataView(bytes.buffer);
-  const w = (o: number, s: string) => {
-    for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i));
-  };
-  w(0, "RIFF");
-  dv.setUint32(4, 36 + dataBytes, true);
-  w(8, "WAVE");
-  w(12, "fmt ");
-  dv.setUint32(16, 16, true);
-  dv.setUint16(20, 1, true);
-  dv.setUint16(22, numCh, true);
-  dv.setUint32(24, buffer.sampleRate, true);
-  dv.setUint32(28, buffer.sampleRate * numCh * 2, true);
-  dv.setUint16(32, numCh * 2, true);
-  dv.setUint16(34, 16, true);
-  w(36, "data");
-  dv.setUint32(40, dataBytes, true);
-  const chans: Float32Array[] = [];
-  for (let c = 0; c < numCh; c++) chans.push(buffer.getChannelData(c));
-  let off = 44;
-  for (let i = 0; i < len; i++) {
-    for (let c = 0; c < numCh; c++) {
-      const s = Math.max(-1, Math.min(1, chans[c][i]));
-      dv.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-      off += 2;
-    }
-  }
-  return bytes;
-};
 export default function App() {
+  const storeRef = useRef<MediaSourceStore | null>(null);
+  if (!storeRef.current) storeRef.current = new MediaSourceStore();
+  const historyRef = useRef<EditHistory | null>(null);
+  if (!historyRef.current) historyRef.current = new EditHistory(storeRef.current);
+  const editHistory = historyRef.current;
+  const historyState = useSyncExternalStore(editHistory.subscribe, editHistory.getSnapshot);
+  const { mediaAssets, audioTracks, aspectRatio, fitMode, transitionDuration } = historyState.project;
+  const clockRef = useRef<PlaybackClock | null>(null);
+  if(!clockRef.current)clockRef.current=new PlaybackClock();
+  const playbackClock=clockRef.current;
+  const playbackState=useSyncExternalStore(playbackClock.subscribe,playbackClock.getSnapshot);
+  const currentTime=playbackState.time,isPlaying=playbackState.playing;
+  const setIsPlaying=useCallback((playing:boolean)=>{if(playing)void playbackClock.play();else playbackClock.pause()},[playbackClock]);
+  const setCurrentTime=useCallback((value:React.SetStateAction<number>)=>{
+    const project=editHistory.getSnapshot().project;playbackClock.setDuration(projectDuration(project.mediaAssets,project.audioTracks));
+    playbackClock.seek(typeof value === "function"?value(playbackClock.getTime()):value);
+  },[playbackClock,editHistory]);
+  const playbackFailure=useCallback((message:string)=>playbackClock.fail(message),[playbackClock]);
+
   const [showIntro, setShowIntro] = useState(true);
-  const [mediaAssets, setMediaAssets] = useState<MediaAsset[]>([]);
-  const [audioTracks, setAudioTracks] = useState<AudioFragment[]>([]);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
+  const [projectFilename, setProjectFilename] = useState<string | null>(null);
+  const [seekRevision, setSeekRevision] = useState(0);
   const [zoom, setZoom] = useState(40);
   const [status, setStatus] = useState("BOOTING...");
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  const [selectedAudioId,setSelectedAudioId]=useState<string|null>(null);
+  const audioCloseRef=useRef<HTMLButtonElement>(null);
+  const audioTriggerRef=useRef<HTMLElement|null>(null);
+  const audioReturnRef=useRef<string|null>(null);
 
   // Export states
-  const [isExporting, setIsExporting] = useState(false);
-  const [exportFailed, setExportFailed] = useState(false);
-  const [exportProgress, setExportProgress] = useState(0);
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
-  const [exportLogs, setExportLogs] = useState<string[]>([]);
+  const [singleEncoder, setSingleEncoder] = useState(false);
   const [exportQuality, setExportQuality] = useState<ExportQuality>("standard");
 
   const [isRecording, setIsRecording] = useState(false);
   const [recDuration, setRecDuration] = useState(10);
+  const recordingRef = useRef<{ cancel: AbortController; stop: AbortController; epoch: number } | null>(null);
+  const recordingEpoch = useRef(0);
+  const [mediaNotice, setMediaNotice] = useState<{ category: string; message: string; deliveryMayHaveStarted?: boolean } | null>(null);
+  const mediaFailure = (error: unknown) => { const value = platformFailure(error); setMediaNotice({ category: value.category, message: value.message, deliveryMayHaveStarted: value.deliveryMayHaveStarted }); return value; };
 
-  const [transitionDuration, setTransitionDuration] = useState(0.5);
-  const [aspectRatio, setAspectRatio] = useState<"16:9" | "9:16" | "1:1">(
-    "16:9",
-  );
-  const [fitMode, setFitMode] = useState<"contain" | "cover">("contain");
   const [showSafeZones, setShowSafeZones] = useState(false);
   const [isTheaterMode, setIsTheaterMode] = useState(false);
   const [showJournal, setShowJournal] = useState(false);
-  const journalEntries = useMemo(() => parseJournal(journalMarkdown), []);
-  const requestRef = useRef<number | null>(null);
-  const startTimeRef = useRef<number>(0);
-  const playbackStartTimeRef = useRef<number>(performance.now());
-  const exportStartTimeRef = useRef<number>(0);
   const projectInputRef = useRef<HTMLInputElement>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
   const timelineContainerRef = useRef<HTMLDivElement>(null);
+  const clipSettingsCloseRef = useRef<HTMLButtonElement>(null);
+  const clipTriggerRef = useRef<HTMLElement | null>(null);
+  const addVisualRef = useRef<HTMLButtonElement>(null);
+  const audioSettingsRef = useRef<HTMLElement>(null);
+  const [focusAudioSettings, setFocusAudioSettings] = useState(false);
+  useEffect(() => {
+    if (!focusAudioSettings || selectedAssetId || selectedAudioId || isTheaterMode || !audioSettingsRef.current) return;
+    const control = audioSettingsRef.current.querySelector<HTMLInputElement>('input[type="range"]') ?? audioSettingsRef.current;
+    control.focus(); control.scrollIntoView({ block: "center", inline: "nearest" }); setFocusAudioSettings(false);
+  }, [focusAudioSettings, selectedAssetId, selectedAudioId, isTheaterMode]);
+  useEffect(() => {
+    if (selectedAssetId && !isTheaterMode) clipSettingsCloseRef.current?.focus();
+  }, [selectedAssetId, isTheaterMode]);
+  useEffect(()=>{if(selectedAudioId&&!isTheaterMode)audioCloseRef.current?.focus()},[selectedAudioId,isTheaterMode]);
+  useEffect(()=>{
+    if(selectedAudioId||isTheaterMode||!audioReturnRef.current)return;
+    const id=audioReturnRef.current;audioReturnRef.current=null;
+    const opener=[...document.querySelectorAll<HTMLButtonElement>('[data-audio-edit]')].find(button=>button.dataset.audioEdit===id);
+    if(opener)opener.focus();else setFocusAudioSettings(true);
+  },[selectedAudioId,isTheaterMode]);
+  const selectClip = (id: string) => {
+    clipTriggerRef.current = document.activeElement as HTMLElement | null;
+    setIsTheaterMode(false);
+    setSelectedAssetId(id);
+    setSelectedAudioId(null);
+    if (id === selectedAssetId && !isTheaterMode) clipSettingsCloseRef.current?.focus();
+  };
+  const selectAudio=(id:string)=>{
+    audioTriggerRef.current=document.activeElement as HTMLElement|null;
+    setIsTheaterMode(false);setSelectedAssetId(null);setSelectedAudioId(id);
+    if(id===selectedAudioId&&!isTheaterMode)audioCloseRef.current?.focus();
+  };
+  const closeAudioSettings=()=>{
+    setSelectedAudioId(null);
+    if(audioTriggerRef.current?.isConnected)audioTriggerRef.current.focus();else audioReturnRef.current=selectedAudioId;
+  };
+  const closeClipSettings = () => {
+    setSelectedAssetId(null);
+    const opener = clipTriggerRef.current?.isConnected ? clipTriggerRef.current : addVisualRef.current;
+    opener?.focus();
+  };
 
-  // Progress tracker for parallel segments
-  const segmentProgress = useRef<number[]>([0, 0]);
+  const editProject = useCallback((label: string, change: (project: ProjectContent) => ProjectContent) => {
+    const changed = editHistory.update(label, change);
+    if (changed) setIsPlaying(false);
+    return changed;
+  }, [editHistory]);
+  const setMediaAssets = useCallback((update: React.SetStateAction<MediaAsset[]>, label = "Edit clips") =>
+    editProject(label, project => ({ ...project, mediaAssets: typeof update === "function" ? update(project.mediaAssets) : update })), [editProject]);
+  const setAudioTracks = useCallback((update: React.SetStateAction<AudioFragment[]>, label = "Edit audio") =>
+    editProject(label, project => ({ ...project, audioTracks: typeof update === "function" ? update(project.audioTracks) : update })), [editProject]);
+  const setAspectRatio = useCallback((value: ProjectContent["aspectRatio"]) => editProject("Change aspect ratio", project => ({ ...project, aspectRatio: value })), [editProject]);
+  const setFitMode = useCallback((value: ProjectContent["fitMode"]) => editProject("Change framing", project => ({ ...project, fitMode: value })), [editProject]);
+  const setTransitionDuration = useCallback((value: number) => editProject("Change crossfades", project => ({ ...project, transitionDuration: value,
+    mediaAssets: sequenceMediaStartTimes(project.mediaAssets, value) })), [editProject]);
+  const beginEditGesture = (event: React.SyntheticEvent) => {
+    if (event.target instanceof HTMLInputElement && event.target.type === "range") editHistory.beginGroup(event.type === "pointerdown");
+  };
+  const endEditGesture = (event: React.SyntheticEvent) => {
+    if(event.type === "blur" && !(event.target instanceof HTMLInputElement && event.target.type === "range"))return;
+    editHistory.endGroup();
+  };
+  const [pendingProject, setPendingProjectState] = useState<File | null>(null);
+  const pendingProjectRef = useRef<File | null>(null);
+  const setPendingProject = (file: File | null) => { pendingProjectRef.current=file;setPendingProjectState(file); };
+
   const cleanupRef = useRef<{
     mediaAssets: MediaAsset[];
     audioTracks: AudioFragment[];
@@ -233,196 +308,251 @@ export default function App() {
     audioTracks: [],
   });
 
+  // Media ownership: immutable originals and every object URL live in this
+  // store; state holds clip instances that reference sources by ID.
+  const projectWorkRef = useRef<ProjectWork | null>(null);
+  if (!projectWorkRef.current) projectWorkRef.current = new ProjectWork(storeRef.current);
+  const projectWork = projectWorkRef.current;
+  const exportJobsRef = useRef<ExportJobs | null>(null);
+  if (!exportJobsRef.current) exportJobsRef.current = new ExportJobs(storeRef.current, runExportPipeline, {}, BUILD_ID);
+  const exportJobs = exportJobsRef.current;
+  const proxyQueueRef = useRef<ProxyQueue | null>(null);
+  if (!proxyQueueRef.current) proxyQueueRef.current = new ProxyQueue(storeRef.current, renderProxy);
+  const proxyQueue = proxyQueueRef.current;
+  const proxyState = useSyncExternalStore(proxyQueue.subscribe, proxyQueue.getSnapshot);
+  const exportState = useSyncExternalStore(exportJobs.subscribe, exportJobs.getSnapshot);
+  const jobDiagnostics = useJobDiagnostics(exportState);
+  const isExporting = exportState.active;
+  const exportFailed = exportState.phase === "failed";
+  const previewWorkPaused = isPlaying || playbackState.preparing || isExporting || !exportState.cleanupComplete;
+  useEffect(() => {
+    if (exportState.phase === "complete") setStatus("READY");
+    if (exportState.phase === "cancelled") setStatus("EXPORT CANCELLED");
+    if (exportState.phase === "failed") {
+      setStatus("EXPORT ERROR");
+      logEvent("error", `Export failed: ${exportState.error}`);
+    }
+  }, [exportState.phase]);
+  const sourceUrl = useCallback(
+    (sourceId: string) => storeRef.current!.urlFor(sourceId),
+    [],
+  );
+  const previewUrl = useCallback(
+    (id: string) => proxyQueue.urlFor(id) || storeRef.current!.urlFor(id),
+    [proxyQueue, proxyState],
+  );
+  useEffect(() => { proxyQueue.sync(mediaAssets, previewWorkPaused); }, [proxyQueue, mediaAssets, previewWorkPaused]);
+
   useEffect(() => {
     cleanupRef.current = { mediaAssets, audioTracks };
   }, [mediaAssets, audioTracks]);
-  const isExportingRef = useRef(isExporting);
-  useEffect(() => {
-    isExportingRef.current = isExporting;
-  }, [isExporting]);
-  const addLog = useCallback((msg: string) => {
-    const elapsed = isExportingRef.current
-      ? Math.floor(performance.now() - exportStartTimeRef.current)
-      : 0;
-    const timestamp = isExportingRef.current ? `[+${elapsed}ms] ` : "";
-    setExportLogs((prev) => [...prev.slice(-19), `${timestamp}${msg}`]);
-  }, []);
+  const saveInFlightRef = useRef(false);
+  const bootAttemptRef = useRef(0);
   // System journal: every user-visible state change lands here as a live
   // event (viewer tab 1). Export-phase chatter stays in exportLogs only —
   // the journal records lifecycle, not per-frame progress.
   const sysLog = useCallback((kind: SystemEventKind, msg: string) => {
     logEvent(kind, msg);
   }, []);
+  const loadMediaTools = useCallback(() => {
+    const attempt = ++bootAttemptRef.current;
+    setStatus("LOADING MEDIA TOOLS...");
+    return ffmpegService.load(message => {
+      if (attempt === bootAttemptRef.current) logEvent("info", message);
+    }).then(() => {
+      if (attempt === bootAttemptRef.current && !exportJobs.getSnapshot().active && !projectWork.busy) setStatus("READY");
+    }).catch(error => {
+      if (attempt !== bootAttemptRef.current) return;
+      setStatus("FATAL ERROR"); setErrorDetail(`FFmpeg failed to load: ${error.message}`);
+    });
+  }, [exportJobs, projectWork]);
   useEffect(() => {
-    ffmpegService
-      .load((msg) => {
-        if (isExportingRef.current) {
-          addLog(msg);
-        } else {
-          setStatus(msg.slice(0, 30).toUpperCase());
-        }
-      })
-      .then(() => setStatus("READY"))
-      .catch((err) => {
-        setStatus("FATAL ERROR");
-        setErrorDetail(`FFmpeg failed to load: ${err.message}`);
-      });
-  }, [addLog]);
+    const release = ffmpegService.retain();
+    void loadMediaTools();
+    return () => {
+      bootAttemptRef.current++;
+      void release().catch(error => logEvent("error", `Media tools cleanup failed: ${String(error)}`));
+    };
+  }, [loadMediaTools]);
+  // The pin-sync effect owns source release: commits pre-pin additions so URLs
+  // exist at first render, and unreferenced sources are released only after
+  // the state that drops them has committed — never while a job lease is open.
+  useEffect(() => {
+    storeRef.current!.syncPins(
+      [...mediaAssets, ...audioTracks].map((item) => item.sourceId),
+    );
+  }, [mediaAssets, audioTracks]);
   useEffect(() => {
     return () => {
-      const { mediaAssets: m, audioTracks: a } = cleanupRef.current;
-      m.forEach((asset) => asset.blobUrl && URL.revokeObjectURL(asset.blobUrl));
-      a.forEach((track) => track.blobUrl && URL.revokeObjectURL(track.blobUrl));
+      projectWork.invalidate();
+      exportJobs.dispose();
+      recordingEpoch.current++; recordingRef.current?.cancel.abort();
+      proxyQueue.dispose();
+      playbackClock.dispose();
+      editHistory.dispose();
+      storeRef.current!.clear();
     };
   }, []);
   const totalDuration = useMemo(
     () => projectDuration(mediaAssets, audioTracks),
     [mediaAssets, audioTracks],
   );
+  useEffect(()=>{playbackClock.setDuration(totalDuration)},[playbackClock,totalDuration]);
+  useEffect(()=>{
+    const hidden=()=>{const state=playbackClock.getSnapshot();if(document.hidden&&(state.playing||state.preparing))playbackClock.pause("Preview paused while the page was hidden. Press Play when you return.")};
+    document.addEventListener("visibilitychange",hidden);return()=>document.removeEventListener("visibilitychange",hidden);
+  },[playbackClock]);
+  const localSnapshot = useMemo(() => ({ mediaAssets, audioTracks, aspectRatio, fitMode,
+    transitionDuration, currentTime }), [mediaAssets, audioTracks, aspectRatio, fitMode, transitionDuration, currentTime]);
+  const localUI = useMemo(() => ({ exportQuality, zoom, showSafeZones, isTheaterMode,
+    ...(projectFilename ? { projectFilename } : {}) }),
+    [exportQuality, zoom, showSafeZones, isTheaterMode, projectFilename]);
+  const recovery = useProjectRecovery(storeRef.current, localSnapshot, localUI, isPlaying, restoreLocal);
+  const recoveryStateRef = useRef(recovery); recoveryStateRef.current = recovery;
   const exportEstimate = useMemo(
     () => estimateExport(exportQuality, totalDuration),
     [exportQuality, totalDuration],
   );
+  const soundPolicy = useMemo(() => mixPolicy(mediaAssets, audioTracks), [mediaAssets, audioTracks]);
   const seekTo = useCallback(
     (t: number) => {
-      const clamped = Math.min(Math.max(0, t), totalDuration);
+      const clamped = clampPlayhead(t, totalDuration);
+      setSeekRevision(value => value + 1);
       setCurrentTime(clamped);
-      if (isPlaying) {
-        startTimeRef.current = clamped;
-        playbackStartTimeRef.current = performance.now();
-      }
     },
     [isPlaying, totalDuration],
   );
-  const clampTransition = useCallback(
-    (duration: number, prevDuration: number, currentDuration: number) => {
-      return Math.max(
-        0,
-        Math.min(duration, prevDuration - 0.1, currentDuration - 0.1),
-      );
-    },
-    [],
-  );
   const recalculateMediaStartTimes = useCallback(
-    (assets: MediaAsset[]): MediaAsset[] => {
-      let currentOffset = 0;
-      return assets.map((m, index) => {
-        const prev = assets[index - 1];
-        const trans =
-          index === 0
-            ? 0
-            : clampTransition(
-                m.transitionDuration ?? transitionDuration,
-                prev.duration,
-                m.duration,
-              );
-        const start = Math.max(0, currentOffset - trans);
-        const updated = { ...m, startTime: start, transitionDuration: trans };
-        currentOffset = start + m.duration;
-        return updated;
-      });
-    },
-    [transitionDuration, clampTransition],
+    (assets: MediaAsset[]): MediaAsset[] =>
+      sequenceMediaStartTimes(assets, transitionDuration),
+    [transitionDuration],
   );
+  // Duration-changing edits also clamp a paused playhead. Loading uses the
+  // same pure rule below, but against the restored project's own duration.
+  useEffect(() => {
+    const clamped = clampPlayhead(currentTime, totalDuration);
+    if (clamped === currentTime) return;
+    setCurrentTime(clamped);
+  }, [currentTime, totalDuration]);
   const handleImportMedia = async () => {
-    let stagedUrl: string | undefined;
+    setMediaNotice(null);
+    const work = projectWork.beginEdit(), tx = work.tx;
     try {
-      const selected = await Flow.media.select({ filter: "all" });
-      if (!selected) return;
+      const selected = await Flow.media.select({ filter: "all", signal: work.signal });
+      work.check();
+      if (!selected) {
+        tx.rollback();
+        return;
+      }
       setStatus("PROBING MEDIA...");
       if (selected.type !== "image" && selected.type !== "video")
         throw new Error("Choose a video or image.");
-      const bUrl = (stagedUrl = createBlobUrl(
-        selected.base64,
-        selected.mimeType,
-      ));
-      const dur = await probeDuration(bUrl, selected.type);
-      const {
-        hasAudio,
-        fps: sourceFps,
-        width: sourceWidth,
-        height: sourceHeight,
-      } = selected.type === "video"
-        ? await probeVideoSource(bUrl)
-        : { hasAudio: false, fps: 0, width: 0, height: 0 };
-      const newAssetBase: MediaAsset = {
-        id: crypto.randomUUID(),
-        mediaId: selected.mediaId,
-        base64: selected.base64,
-        mimeType: selected.mimeType,
-        type: selected.type as "image" | "video",
-        name: selected.name,
-        duration: dur,
-        originalDuration: dur,
-        trimStart: 0,
-        trimEnd: 0,
-        filter: "none",
-        startTime: 0,
-        blobUrl: bUrl,
-        hasAudio,
-        muted: false,
-        sourceFps: sourceFps || undefined,
-        sourceWidth: sourceWidth || undefined,
-        sourceHeight: sourceHeight || undefined,
-      };
-      setMediaAssets((prev) => {
-        const last = prev[prev.length - 1];
-        const trans = last
-          ? clampTransition(transitionDuration, last.duration, dur)
-          : 0;
-        const start = last
-          ? Math.max(0, last.startTime + last.duration - trans)
-          : 0;
-        return [
-          ...prev,
-          { ...newAssetBase, startTime: start, transitionDuration: trans },
-        ];
-      });
-      sysLog(
-        "import",
-        `Clip: ${selected.name} (${selected.type}, ${dur.toFixed(1)}s${sourceFps ? `, ${Number(sourceFps.toFixed(3))}fps` : ""}${sourceWidth ? `, ${sourceWidth}x${sourceHeight}` : ""})`,
-      );
-      setStatus("READY");
+      // Host transport delivers base64; the store holds Blob originals.
+      const [asset] = await tx.stage([
+        { bytes: base64ToBlob(selected.base64, selected.mimeType), mimeType: selected.mimeType },
+      ]);
+      const probeLease = tx.acquire(asset.sourceId, "import-probe");
+      try {
+        const dur = await probeDuration(probeLease.url, selected.type, work.signal);
+        const {
+          hasAudio,
+          fps: sourceFps,
+          width: sourceWidth,
+          height: sourceHeight,
+        } = selected.type === "video"
+          ? await probeVideoSource(asset.bytes, work.signal)
+          : { hasAudio: false, fps: 0, width: 0, height: 0 };
+        const newAssetBase: MediaAsset = {
+          id: crypto.randomUUID(),
+          mediaId: selected.mediaId,
+          sourceId: asset.sourceId,
+          mimeType: selected.mimeType,
+          type: selected.type as "image" | "video",
+          name: selected.name,
+          duration: dur,
+          originalDuration: dur,
+          trimStart: 0,
+          trimEnd: 0,
+          filter: "none",
+          startTime: 0,
+          hasAudio,
+          muted: false,
+          sourceFps: sourceFps || undefined,
+          sourceWidth: sourceWidth || undefined,
+          sourceHeight: sourceHeight || undefined,
+        };
+        work.check(); tx.pin(asset.sourceId);
+        setMediaAssets((prev) =>
+          recalculateMediaStartTimes([...prev, newAssetBase]),
+        );
+        work.commit();
+        sysLog(
+          "import",
+          `Clip: ${selected.name} (${selected.type}, ${dur.toFixed(1)}s${sourceFps ? `, ${Number(sourceFps.toFixed(3))}fps` : ""}${sourceWidth ? `, ${sourceWidth}x${sourceHeight}` : ""})`,
+        );
+        setStatus("READY");
+      } finally {
+        probeLease.release();
+      }
     } catch (err) {
-      if (stagedUrl) URL.revokeObjectURL(stagedUrl);
-      setStatus("IMPORT ERROR");
+      tx.rollback();
+      if (!work.isCurrent()) return;
+      const error = mediaFailure(work.signal.aborted ? work.signal.reason : err);
+      setStatus(error.category === "cancelled" ? "IMPORT CANCELLED" : "IMPORT ERROR");
       sysLog("error", `Clip import failed: ${String(err).slice(0, 120)}`);
-    }
+    } finally { work.finish(); }
   };
   const handleImportGalleryAudio = async () => {
-    let stagedUrl: string | undefined;
+    setMediaNotice(null);
+    const work = projectWork.beginEdit(), tx = work.tx;
     try {
-      const selected = await Flow.media.select({ filter: "audio" });
-      if (!selected) return;
+      const selected = await Flow.media.select({ filter: "audio", signal: work.signal });
+      work.check();
+      if (!selected) {
+        tx.rollback();
+        return;
+      }
       setStatus("LOADING AUDIO...");
-      const bUrl = (stagedUrl = createBlobUrl(
-        selected.base64,
-        selected.mimeType,
-      ));
-      const duration = await probeDuration(bUrl, "audio");
+      const [asset] = await tx.stage([
+        {
+          bytes: base64ToBlob(selected.base64, selected.mimeType),
+          mimeType: selected.mimeType,
+        },
+      ]);
+      const probeLease = tx.acquire(asset.sourceId, "import-probe");
+      let duration: number;
+      try {
+        duration = await probeAudioDuration(asset.bytes, probeLease.url, work.signal);
+      } finally {
+        probeLease.release();
+      }
+      work.check(); tx.pin(asset.sourceId);
       setAudioTracks((prev) => [
         ...prev,
         {
           id: crypto.randomUUID(),
           mediaId: selected.mediaId,
-          base64: selected.base64,
+          sourceId: asset.sourceId,
           mimeType: selected.mimeType,
           name: selected.name,
           startTime: currentTime,
           duration,
-          blobUrl: bUrl,
+          originalDuration:duration,trimStart:0,trimEnd:0,
         },
       ]);
+      work.commit();
       sysLog(
         "import",
         `Audio track: ${selected.name} (${duration.toFixed(1)}s @ ${currentTime.toFixed(1)}s)`,
       );
       setStatus("READY");
     } catch (err) {
-      if (stagedUrl) URL.revokeObjectURL(stagedUrl);
-      setStatus("AUDIO ERROR");
+      tx.rollback();
+      if (!work.isCurrent()) return;
+      const error = mediaFailure(work.signal.aborted ? work.signal.reason : err);
+      setStatus(error.category === "cancelled" ? "AUDIO CANCELLED" : "AUDIO ERROR");
       sysLog("error", `Audio import failed: ${String(err).slice(0, 120)}`);
-    }
+    } finally { work.finish(); }
   };
   const handleImportLocalAudio = async (
     event: React.ChangeEvent<HTMLInputElement>,
@@ -431,37 +561,55 @@ export default function App() {
     if (!files.length) return;
     const startTime = currentTime;
     const staged: AudioFragment[] = [];
-    const urls: string[] = [];
+    setMediaNotice(null);
+    const work = projectWork.beginEdit(), tx = work.tx;
     setStatus("IMPORTING AUDIO...");
     try {
-      for (const file of files) {
-        const blobUrl = URL.createObjectURL(file);
-        urls.push(blobUrl);
-        const duration = await probeDuration(blobUrl, "audio");
-        const base64 = await blobToBase64(file);
+      const mimeTypes = files.map(audioFileType);
+      // One batch: identical files share a single immutable source.
+      const assets = await tx.stage(
+        files.map((file, index) => ({ bytes: file, mimeType: mimeTypes[index] })),
+      );
+      for (const [index, file] of files.entries()) {
+        const asset = assets[index];
+        const probeLease = tx.acquire(asset.sourceId, "import-probe");
+        let duration: number;
+        try {
+          duration = await probeAudioDuration(asset.bytes, probeLease.url, work.signal);
+        } finally {
+          probeLease.release();
+        }
+        const id = crypto.randomUUID();
         staged.push({
-          id: crypto.randomUUID(),
-          mediaId: "",
-          base64,
-          mimeType: file.type,
+          id,
+          // No gallery reference for a local file: use the entry ID, the same
+          // default the project schema applies to missing references.
+          mediaId: id,
+          sourceId: asset.sourceId,
+          mimeType: mimeTypes[index],
           name: file.name,
           startTime,
           duration,
-          blobUrl,
+          originalDuration:duration,trimStart:0,trimEnd:0,
         });
       }
+      work.check(); staged.forEach((track) => tx.pin(track.sourceId));
       setAudioTracks((previous) => [...previous, ...staged]);
+      work.commit();
       sysLog(
         "import",
         `Added ${staged.length} audio file(s) in parallel at ${startTime.toFixed(2)}s`,
       );
       setStatus("READY");
     } catch (error) {
-      urls.forEach((url) => URL.revokeObjectURL(url));
-      setStatus("AUDIO ERROR");
+      tx.rollback();
+      if (!work.isCurrent()) return;
+      const failure = mediaFailure(work.signal.aborted ? work.signal.reason : error);
+      setStatus(failure.category === "cancelled" ? "AUDIO CANCELLED" : "AUDIO ERROR");
       sysLog("error", `Audio import failed: ${String(error).slice(0, 120)}`);
     } finally {
-      event.target.value = "";
+      if (work.isCurrent()) event.target.value = "";
+      work.finish();
     }
   };
   const handleRecord = async () => {
@@ -469,65 +617,65 @@ export default function App() {
     setIsRecording(true);
     setIsPlaying(false);
     setStatus(`RECORDING...`);
+    setMediaNotice(null);
+    const capture = { cancel: new AbortController(), stop: new AbortController(), epoch: ++recordingEpoch.current };
+    recordingRef.current = capture;
+    const work = projectWork.beginEdit(), tx = work.tx;
+    const cancelCapture = () => capture.cancel.abort(work.signal.reason);
+    const cancelStaging = () => work.cancel(capture.cancel.signal.reason);
+    work.signal.addEventListener("abort", cancelCapture, { once: true });
+    capture.cancel.signal.addEventListener("abort", cancelStaging, { once: true });
     try {
       const audio = await Flow.microphone.record({
-        durationMs: recDuration * 1000,
+        durationMs: recDuration * 1000, signal: capture.cancel.signal, stopSignal: capture.stop.signal,
       });
-      const bUrl = createBlobUrl(audio.base64, audio.mimeType);
+      capture.cancel.signal.throwIfAborted();
+      if (capture.epoch !== recordingEpoch.current) throw new DOMException("Project changed", "AbortError");
+      const [asset] = await tx.stage([
+        {
+          bytes: base64ToBlob(audio.base64, audio.mimeType),
+          mimeType: audio.mimeType,
+        },
+      ]);
+      work.check(); capture.cancel.signal.throwIfAborted(); tx.pin(asset.sourceId);
       const timeStr = new Date().toLocaleTimeString("en-US", { hour12: false });
+      const id = crypto.randomUUID();
       setAudioTracks((prev) => [
         ...prev,
         {
-          id: crypto.randomUUID(),
-          mediaId: "",
-          base64: audio.base64,
+          id,
+          mediaId: id,
+          sourceId: asset.sourceId,
           mimeType: audio.mimeType,
           name: `VOICE_${timeStr}`,
           startTime: currentTime,
           duration: audio.durationMs / 1000,
-          blobUrl: bUrl,
+          originalDuration:audio.durationMs/1000,trimStart:0,trimEnd:0,
         },
       ]);
+      work.commit();
       setStatus("READY");
       sysLog(
         "import",
         `Voice-over (${(audio.durationMs / 1000).toFixed(1)}s @ ${currentTime.toFixed(1)}s)`,
       );
     } catch (err) {
-      setStatus("RECORD ERROR");
+      tx.rollback();
+      if (!work.isCurrent() || capture.epoch !== recordingEpoch.current) return;
+      const error = mediaFailure(work.signal.aborted ? work.signal.reason : err);
+      setStatus(error.category === "cancelled" ? "RECORD CANCELLED" : "RECORD ERROR");
       sysLog("error", `Voice recording failed: ${String(err).slice(0, 120)}`);
     } finally {
-      setIsRecording(false);
+      work.signal.removeEventListener("abort", cancelCapture);
+      capture.cancel.signal.removeEventListener("abort", cancelStaging);
+      work.finish();
+      if (recordingRef.current === capture) { recordingRef.current = null; setIsRecording(false); }
     }
   };
   const togglePlayback = () => {
-    if (!isPlaying) {
-      playbackStartTimeRef.current = performance.now();
-      startTimeRef.current = currentTime;
-    }
-    setIsPlaying(!isPlaying);
+    const state=playbackClock.getSnapshot();
+    if(state.playing||state.preparing)playbackClock.pause();else void playbackClock.play();
   };
-  const animate = useCallback(
-    (time: number) => {
-      if (!isPlaying) return;
-      const elapsed = (time - playbackStartTimeRef.current) / 1000;
-      const newTime = startTimeRef.current + elapsed;
-      if (newTime >= totalDuration) {
-        setIsPlaying(false);
-        setCurrentTime(totalDuration);
-      } else {
-        setCurrentTime(newTime);
-        requestRef.current = requestAnimationFrame(animate);
-      }
-    },
-    [totalDuration, isPlaying],
-  );
-  useEffect(() => {
-    if (isPlaying) requestRef.current = requestAnimationFrame(animate);
-    return () => {
-      if (requestRef.current) cancelAnimationFrame(requestRef.current);
-    };
-  }, [isPlaying, animate]);
   const handleMoveMedia = useCallback(
     (id: string, direction: "left" | "right") => {
       setMediaAssets((prev) => {
@@ -557,11 +705,11 @@ export default function App() {
   const handleDeleteMedia = useCallback(
     (id: string) => {
       const asset = cleanupRef.current.mediaAssets.find((m) => m.id === id);
-      if (asset?.blobUrl) {
-        URL.revokeObjectURL(asset.blobUrl);
-      }
       if (asset) logEvent("info", `Clip removed: ${asset.name}`);
-      if (selectedAssetId === id) setSelectedAssetId(null);
+      if (selectedAssetId === id) {
+        setSelectedAssetId(null);
+        addVisualRef.current?.focus();
+      }
       setMediaAssets((prev) => {
         return recalculateMediaStartTimes(prev.filter((m) => m.id !== id));
       });
@@ -570,24 +718,42 @@ export default function App() {
   );
   const handleDeleteAudio = useCallback((id: string) => {
     const track = cleanupRef.current.audioTracks.find((t) => t.id === id);
-    if (track?.blobUrl) {
-      URL.revokeObjectURL(track.blobUrl);
-    }
     if (track) logEvent("info", `Audio track removed: ${track.name}`);
     setAudioTracks((prev) => prev.filter((t) => t.id !== id));
-  }, []);
+    if(selectedAudioId===id){setSelectedAudioId(null);setFocusAudioSettings(true)}
+  }, [selectedAudioId]);
+  const travelHistory = useCallback((direction: "undo" | "redo") => {
+    if (exportJobs.getSnapshot().active || isRecording || !editHistory.getSnapshot()[direction === "undo" ? "canUndo" : "canRedo"]) return;
+    projectWork.invalidate();setIsPlaying(false);editHistory[direction]();setSeekRevision(value=>value+1);
+    const next=editHistory.getSnapshot().project;
+    setCurrentTime(time=>clampPlayhead(time,projectDuration(next.mediaAssets,next.audioTracks)));
+    setSelectedAssetId(id=>next.mediaAssets.some(asset=>asset.id===id)?id:null);
+    setSelectedAudioId(id=>next.audioTracks.some(track=>track.id===id)?id:null);
+  }, [editHistory,exportJobs,isRecording,projectWork]);
+  useEffect(() => {
+    const warn=(event:BeforeUnloadEvent)=>{if(editHistory.getSnapshot().dirty && recoveryStateRef.current.status!=="saved"){event.preventDefault();event.returnValue=""}};
+    window.addEventListener("beforeunload",warn);return()=>window.removeEventListener("beforeunload",warn);
+  }, [editHistory]);
+  useEffect(() => {
+    const key=(event:KeyboardEvent)=>{
+      if(!(event.ctrlKey||event.metaKey)||event.altKey||showIntro||showJournal||pendingProject)return;
+      const target=event.target as HTMLElement|null;
+      if(target?.isContentEditable||target?.closest('textarea, input:not([type="range"])'))return;
+      const undo=event.key.toLowerCase()==="z"&&!event.shiftKey,redo=(event.key.toLowerCase()==="z"&&event.shiftKey)||event.key.toLowerCase()==="y";
+      if(undo||redo){event.preventDefault();travelHistory(undo?"undo":"redo")}
+    };
+    window.addEventListener("keydown",key);return()=>window.removeEventListener("keydown",key);
+  },[travelHistory,showIntro,showJournal,pendingProject]);
   // Keyboard shortcuts: Space = play/pause, arrows = seek (Shift = 5s),
   // Delete/Backspace = remove selected clip. Ignored while typing or exporting.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (isExporting || isRecording || showIntro || showJournal) return;
+      if (e.defaultPrevented || e.ctrlKey || e.altKey || e.metaKey) return;
+      if (isExporting || isRecording || showIntro || showJournal || pendingProject) return;
       const target = e.target as HTMLElement | null;
       if (
         target &&
-        (target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.tagName === "SELECT" ||
-          target.tagName === "BUTTON" ||
+        (target.closest("input, textarea, select, button, summary, a, [role=dialog]") ||
           target.isContentEditable)
       )
         return;
@@ -615,6 +781,7 @@ export default function App() {
     isRecording,
     showIntro,
     showJournal,
+    pendingProject,
     currentTime,
     selectedAssetId,
     togglePlayback,
@@ -622,90 +789,133 @@ export default function App() {
     handleDeleteMedia,
   ]);
   const handleSaveProject = async () => {
+    if (saveInFlightRef.current) return;
+    setMediaNotice(null);
+    saveInFlightRef.current = true;
     setStatus("SAVING PROJECT...");
+    // One consistent snapshot of a single render's state. Every source is
+    // leased before the first await, so replacing or deleting the project
+    // mid-save retires pins but cannot purge the bytes this save is reading.
+    const savedGeneration = editHistory.generation;
+    const snapshot = {
+      projectFilename,
+      mediaAssets,
+      audioTracks,
+      aspectRatio,
+      fitMode,
+      transitionDuration,
+      currentTime,
+    };
+    let leases: SourceLease[] = [];
     try {
-      const data = {
-        schemaVersion: 1,
-        mediaAssets: mediaAssets.map(({ blobUrl, ...rest }) => rest),
-        audioTracks: audioTracks.map(({ blobUrl, ...rest }) => rest),
-        aspectRatio,
-        fitMode,
-        transitionDuration,
-        currentTime,
-      };
-      const blob = new Blob([JSON.stringify(data)], {
-        type: "application/json",
+      leases = storeRef.current!.acquireAll(
+        [...snapshot.mediaAssets, ...snapshot.audioTracks].map(
+          (item) => item.sourceId,
+        ),
+        "project-save",
+      );
+      // Base64 appears only at this transport boundary.
+      const json = await serializeProject(snapshot, async (sourceId) => {
+        const bytes = storeRef.current!.bytesFor(sourceId);
+        if (!bytes) throw new Error("Missing media source.");
+        return blobToBase64(bytes);
       });
-      const reader = new FileReader();
-      reader.onload = async () => {
-        try {
-          const base64 = (reader.result as string).split(",")[1];
-          const stamp = new Date()
-            .toISOString()
-            .replace(/[:.]/g, "-")
-            .slice(0, 16);
-          await Flow.download({
-            base64,
-            mimeType: "application/json",
-            filename: `clipbraid_project_${stamp}.json`,
-          });
-          sysLog(
-            "save",
-            `Project saved: ${mediaAssets.length} clips, ${audioTracks.length} audio tracks (${(base64.length / 1048576).toFixed(1)} MiB)`,
-          );
-          setStatus("READY");
-        } catch (err) {
-          setStatus("SAVE ERROR");
-          sysLog("error", `Project save failed: ${String(err).slice(0, 120)}`);
-        }
-      };
-      reader.readAsDataURL(blob);
+      const base64 = await blobToBase64(
+        new Blob([json], { type: "application/json" }),
+      );
+      const accepted = await Flow.download({
+        base64,
+        mimeType: "application/json",
+        filename: snapshot.projectFilename || defaultProjectFilename(),
+      });
+      if (!accepted) throw new Error("Project download was not acknowledged.");
+      editHistory.markSaved({ mediaAssets: snapshot.mediaAssets, audioTracks: snapshot.audioTracks, aspectRatio: snapshot.aspectRatio, fitMode: snapshot.fitMode, transitionDuration: snapshot.transitionDuration }, savedGeneration);
+      sysLog(
+        "save",
+        `Project file handed to download adapter: ${snapshot.mediaAssets.length} clips, ${snapshot.audioTracks.length} audio tracks (${(base64.length / 1048576).toFixed(1)} MiB)`,
+      );
+      setStatus("READY");
+      return true;
     } catch (err) {
-      setStatus("SAVE ERROR");
+      const error = mediaFailure(err);
+      setStatus(error.category === "cancelled" ? "SAVE CANCELLED" : "SAVE ERROR");
       sysLog("error", `Project save failed: ${String(err).slice(0, 120)}`);
+      return false;
+    } finally {
+      for (const lease of leases) lease.release();
+      saveInFlightRef.current = false;
     }
   };
-  const loadProjectText = async (text: string): Promise<boolean> => {
+  const loadProjectState = async (data: ProjectSnapshot, sources: { sourceId: string; bytes: Blob; mimeType: string }[],
+    work: ProjectWorkUnit, options: { filename?: string | null; ui?: RecoveryData["record"]["ui"] } = {}): Promise<boolean> => {
+    work.check();
+    setMediaNotice(null);
     setStatus("LOADING PROJECT...");
-    const stagedUrls: string[] = [];
+    const tx = work.tx;
     try {
-      const data = parseProject(text);
-      const restore = <T extends { base64: string; mimeType: string }>(
-        asset: T,
-      ) => {
-        const blobUrl = createBlobUrl(asset.base64, asset.mimeType);
-        stagedUrls.push(blobUrl);
-        return { ...asset, blobUrl };
-      };
-      const restoredMedia = data.mediaAssets.map(restore);
-      const restoredAudio = data.audioTracks.map(restore);
-      const restoredTime = Math.max(
-        0,
-        Math.min(
-          data.currentTime,
-          projectDuration(restoredMedia, restoredAudio),
-        ),
+      data = validateProjectMetadata(data);
+      const ids = new Set(sources.map(source => source.sourceId));
+      for (const item of [...data.mediaAssets, ...data.audioTracks])
+        if (!ids.has(item.sourceId)) throw new Error("Missing referenced source.");
+      // Stage and validate every source before touching live state; identical
+      // payloads share one immutable original. No URL exists until commit.
+      const staged = await tx.stage(
+        sources.map((source) => ({
+          bytes: source.bytes,
+          mimeType: source.mimeType,
+        })),
       );
-      const previous = cleanupRef.current;
+      work.check();
+      const stagedIds = [...new Set(staged.map((asset) => asset.sourceId))];
+      const idMap = new Map(
+        sources.map((source, index) => [
+          source.sourceId,
+          staged[index].sourceId,
+        ]),
+      );
+      const videoSources = new Set(data.mediaAssets.filter(clip => clip.type === "video").map(clip => idMap.get(clip.sourceId)!));
+      const audioPresence = new Map<string, boolean>();
+      for (const sourceId of videoSources) {
+        try { audioPresence.set(sourceId, await sourceHasAudio(storeRef.current!.bytesFor(sourceId)!, work.signal)); }
+        catch { work.check(); /* Keep damaged sources available for inspection/relink; export preflight will reject them. */ }
+      }
+      work.check();
+      const restoredMedia = data.mediaAssets.map((clip) => ({
+        ...clip,
+        sourceId: idMap.get(clip.sourceId)!,
+        hasAudio: clip.type === "video" ? audioPresence.get(idMap.get(clip.sourceId)!) ?? clip.hasAudio : clip.hasAudio,
+      }));
+      const restoredAudio = data.audioTracks.map((track) => ({
+        ...track,
+        sourceId: idMap.get(track.sourceId)!,
+      }));
+      const restoredTime = clampPlayhead(
+        data.currentTime,
+        projectDuration(restoredMedia, restoredAudio),
+      );
+      // Commit: pre-pin so URLs exist at the first render, then publish one
+      // batched state update. The pin-sync effect releases the replaced
+      // project's sources only after that commit. Any failure before this
+      // point rolls the transaction back and leaves the old project untouched.
+      stagedIds.forEach((sourceId) => tx.pin(sourceId));
+      recordingEpoch.current++; recordingRef.current?.cancel.abort();
       setIsPlaying(false);
       setSelectedAssetId(null);
-      setMediaAssets(restoredMedia);
-      setAudioTracks(restoredAudio);
-      setAspectRatio(data.aspectRatio);
-      setFitMode(data.fitMode);
-      setTransitionDuration(data.transitionDuration);
+      setSelectedAudioId(null);
+      setPendingProject(null);
+      editHistory.reset({ mediaAssets: restoredMedia, audioTracks: restoredAudio,
+        aspectRatio: data.aspectRatio, fitMode: data.fitMode, transitionDuration: data.transitionDuration }, !options.ui);
       setCurrentTime(restoredTime);
-      startTimeRef.current = restoredTime;
+      setProjectFilename(options.filename ?? null);
+      if (options.ui) {
+        setExportQuality(options.ui.exportQuality); setZoom(options.ui.zoom);
+        setShowSafeZones(options.ui.showSafeZones); setIsTheaterMode(options.ui.isTheaterMode);
+      }
       cleanupRef.current = {
         mediaAssets: restoredMedia,
         audioTracks: restoredAudio,
       };
-      previous.mediaAssets.forEach(
-        (asset) => asset.blobUrl && URL.revokeObjectURL(asset.blobUrl),
-      );
-      previous.audioTracks.forEach(
-        (track) => track.blobUrl && URL.revokeObjectURL(track.blobUrl),
-      );
+      work.commit();
       sysLog(
         "import",
         `Project loaded: ${restoredMedia.length} clips, ${restoredAudio.length} audio tracks`,
@@ -713,17 +923,103 @@ export default function App() {
       setStatus("READY");
       return true;
     } catch (err) {
-      stagedUrls.forEach((url) => URL.revokeObjectURL(url));
+      tx.rollback();
+      if (!work.isCurrent() || work.signal.aborted) return false;
       setStatus("LOAD ERROR");
+      setMediaNotice({ category: "project", message: "Could not open this project. Your current project is still available." });
       sysLog("error", `Project load failed: ${String(err).slice(0, 120)}`);
       return false;
     }
   };
+  const loadProjectText = async (text: string, filename?: string, request?: ProjectWorkUnit): Promise<boolean> => {
+    const work = request ?? projectWork.beginLoad();
+    try {
+      work.check();
+      const data = parseProject(text);
+      return await loadProjectState(data, data.sources.map(source => ({
+        sourceId: source.sourceId, bytes: base64ToBlob(source.base64, source.mimeType), mimeType: source.mimeType,
+      })), work, { filename: normalizeProjectFilename(filename) });
+    } catch (error) {
+      if (!work.isCurrent()) return false;
+      setMediaNotice({ category: "project", message: "Could not open this project. Your current project is still available." });
+      setStatus("LOAD ERROR"); sysLog("error", `Project load failed: ${String(error).slice(0, 120)}`); return false;
+    } finally { if (!request) work.finish(); }
+  };
+  async function restoreLocal(data: RecoveryData, signal: AbortSignal) {
+    const work = projectWork.beginLoad();
+    const cancel = () => {
+      work.cancel(signal.reason);
+      if (work.isCurrent() && !projectWork.busy) setStatus("READY");
+    };
+    signal.addEventListener("abort", cancel, { once: true });
+    try {
+      signal.throwIfAborted();
+      return await loadProjectState(data.record.snapshot, data.sources, work,
+        { filename: data.record.ui.projectFilename, ui: data.record.ui });
+    }
+    finally { signal.removeEventListener("abort", cancel); work.finish(); }
+  }
   const handleLoadProject = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
-    await loadProjectText(await file.text());
     e.target.value = "";
+    if (!file) return;
+    if (editHistory.getSnapshot().dirty) { setPendingProject(file); return; }
+    await openProjectFile(file);
+  };
+  const openProjectFile = async (file: File) => {
+    const work = projectWork.beginLoad();
+    setMediaNotice(null); setStatus("LOADING PROJECT...");
+    // Gate on the real byte size before reading, parsing or allocating anything.
+    // File reads are inside the same error boundary as staged load failures,
+    // and the input is reset even when the host filesystem read rejects.
+    try {
+      assertProjectSize(file.size);
+      const text = await readProjectText(file, work.signal);
+      work.check();
+      await loadProjectText(text, file.name, work);
+    } catch (err) {
+      if (!work.isCurrent()) return;
+      setStatus("LOAD ERROR");
+      setMediaNotice({ category: "project", message: "Could not read this project file. Your current project is still available." });
+      sysLog("error", `Project load failed: ${String(err).slice(0, 120)}`);
+    } finally {
+      work.finish();
+    }
+  };
+  const handleRelinkOriginal = async () => {
+    if (!selectedAssetId || isExporting) return;
+    const target = cleanupRef.current.mediaAssets.find(asset => asset.id === selectedAssetId);
+    if (!target || target.type !== "video") return;
+    setMediaNotice(null);
+    const work = projectWork.beginEdit(), tx = work.tx;
+    try {
+      const selected = await Flow.media.select({ filter: "video", signal: work.signal });
+      work.check();
+      if (!selected) { tx.rollback(); return; }
+      if (!selected.mimeType.startsWith("video/")) throw new Error("Choose an original video file.");
+      const [source] = await tx.stage([{ bytes: base64ToBlob(selected.base64, selected.mimeType), mimeType: selected.mimeType }]);
+      const lease = tx.acquire(source.sourceId);
+      const duration = await probeDuration(lease.url, "video", work.signal);
+      const metadata = await probeVideoSource(source.bytes, work.signal);
+      work.check();
+      const current = cleanupRef.current.mediaAssets;
+      if (!current.some(asset => asset.sourceId === target.sourceId)) throw new Error("This source is no longer in the project.");
+      const updated = current.map(asset => {
+        if (asset.sourceId !== target.sourceId) return asset;
+        if (asset.trimStart + asset.duration > duration + 0.001) throw new Error("The chosen file is shorter than a selected source interval; choose the full original.");
+        return { ...asset, sourceId: source.sourceId, mimeType: selected.mimeType,
+          originalDuration: duration, trimEnd: Math.max(0, duration - asset.trimStart - asset.duration),
+          hasAudio: metadata.hasAudio, sourceFps: metadata.fps, sourceWidth: metadata.width,
+          sourceHeight: metadata.height, normalized: false };
+      });
+      tx.pin(source.sourceId); setMediaAssets(updated); work.commit();
+      setStatus("READY"); sysLog("import", "Original video relinked; clip selections were preserved.");
+    } catch (error) {
+      tx.rollback(); if (!work.isCurrent()) return;
+      setStatus("RELINK ERROR");
+      setMediaNotice({ category: "relink", message: "Could not relink the original file." });
+      sysLog("error", `Could not relink original: ${String(error)}`);
+    } finally { work.finish(); }
   };
   // Test/measurement hook (test-mode dev server + ?e2e=1 only): loads a
   // draft from a URL and run the export — the local measurement harness.
@@ -737,11 +1033,26 @@ export default function App() {
       return;
     (window as any).__clipbraidE2E = {
       loadFromUrl: async (url: string) => {
-        const text = await (await fetch(url)).text();
-        return loadProjectTextRef.current(text);
+        const work = projectWork.beginLoad();
+        try {
+          const text = await (await fetch(url, { signal: work.signal })).text();
+          work.check(); return await loadProjectTextRef.current(text, undefined, work);
+        } finally { work.finish(); }
       },
-      // Legacy measurement API: normalization is deliberately disabled.
-      normalizeAll: async () => 0,
+      loadText: (text: string, filename?: string) => loadProjectTextRef.current(text, filename),
+      projectWorkIdle: projectWork.idle,
+      normalizeAll: async () => {
+        proxyQueue.request(cleanupRef.current.mediaAssets);
+        await proxyQueue.idle();
+        return proxyQueue.getSnapshot().filter(job => job.status === "ready").length;
+      },
+      proxyState: proxyQueue.getSnapshot,
+      mediaInventory: () => storeRef.current!.snapshot(),
+      playbackClock: playbackClock.observe,
+      localRecovery: () => ({ status: recoveryStateRef.current.status, revision: recoveryStateRef.current.revision,
+        usage: recoveryStateRef.current.usage }),
+      exportState: exportJobs.getSnapshot,
+      exportDeadlines: exportJobs.setDeadlines,
     };
     return () => {
       delete (window as any).__clipbraidE2E;
@@ -749,6 +1060,9 @@ export default function App() {
   }, []);
   const updateSelectedAsset = (updates: Partial<MediaAsset>) => {
     if (!selectedAssetId) return;
+    const label = updates.trimStart !== undefined || updates.trimEnd !== undefined ? "Trim clip"
+      : updates.filter !== undefined ? "Change look" : updates.gain !== undefined ? "Change clip volume"
+      : updates.transitionDuration !== undefined ? "Change crossfade" : "Edit clip";
     setMediaAssets((prev) => {
       const index = prev.findIndex((m) => m.id === selectedAssetId);
       if (index === -1) return prev;
@@ -757,568 +1071,53 @@ export default function App() {
       const merged = { ...asset, ...updates };
 
       if (updates.trimStart !== undefined || updates.trimEnd !== undefined) {
-        merged.duration = Math.max(
-          0.1,
-          merged.originalDuration - (merged.trimStart + merged.trimEnd),
-        );
+        merged.duration = trimmedDuration(merged);
       }
 
       newAssets[index] = merged;
       return recalculateMediaStartTimes(newAssets);
-    });
+    }, label);
   };
   const selectedAsset = useMemo(
     () => mediaAssets.find((m) => m.id === selectedAssetId),
     [mediaAssets, selectedAssetId],
   );
+  const selectedAudio=audioTracks.find(track=>track.id===selectedAudioId);
+  const changeAudio=(id:string,label:string,change:(track:AudioFragment)=>AudioFragment)=>
+    setAudioTracks(tracks=>tracks.map(track=>track.id===id?change(track):track),label);
+  const moveAudioTrack=(id:string,time:number)=>changeAudio(id,"Move audio",track=>moveAudio(track,time));
   // Originals stay authoritative. Proxy generation returns only with
   // provide separate, cancellable storage; never rewrite imported bytes in idle time.
-  const applyCanvasFilter = (
-    ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D,
-    filter: VisualFilter,
-  ) => {
-    switch (filter) {
-      case "grayscale":
-        ctx.filter = "grayscale(100%)";
-        break;
-      case "sepia":
-        ctx.filter = "sepia(100%)";
-        break;
-      case "noir":
-        ctx.filter = "grayscale(100%) contrast(150%) brightness(80%)";
-        break;
-      case "vintage":
-        ctx.filter = "sepia(50%) contrast(90%) brightness(110%) saturate(80%)";
-        break;
-      case "warm":
-        ctx.filter = "sepia(30%) saturate(120%) brightness(105%)";
-        break;
-      case "cool":
-        ctx.filter = "hue-rotate(180deg) saturate(80%) brightness(105%)";
-        break;
-      default:
-        ctx.filter = "none";
-        break;
-    }
-  };
-  const handleExport = async () => {
-    if (mediaAssets.length === 0 || isExporting) return;
-    setIsExporting(true);
-    setExportFailed(false);
-    setErrorDetail(null);
-    setExportProgress(0);
-    setExportLogs([]);
-    segmentProgress.current = [0, 0];
-    exportStartTimeRef.current = performance.now();
-
-    try {
-      addLog("EXPORT STARTED");
-      setIsPlaying(false);
-      await ffmpegService.load();
-      await initMediaCodecs();
-      sysLog(
-        "export",
-        `Export started: ${exportQuality}, ${totalDuration.toFixed(1)}s timeline, ${mediaAssets.length} clips + ${audioTracks.length} audio tracks`,
-      );
-      addLog("PASS 1/4: Initializing Parallel Visual Pipeline...");
-      const isDraft = exportQuality === "draft";
-      const baseRes = isDraft ? 480 : 720;
-
-      let targetWidth, targetHeight;
-      if (aspectRatio === "16:9") {
-        targetWidth = isDraft ? 854 : 1280;
-        targetHeight = baseRes;
-      } else if (aspectRatio === "9:16") {
-        targetWidth = baseRes;
-        targetHeight = isDraft ? 854 : 1280;
-      } else {
-        // 1:1
-        targetWidth = baseRes;
-        targetHeight = baseRes;
-      }
-      // --- T1: render at the sources' frame rate (no duplicated frames) ---
-      // Blobs are fetched once per export and shared by the fps probe,
-      // the segment renderers and the audio mix.
-      const blobByUrl = new Map<string, Blob>();
-      const getBlob = async (url: string | undefined): Promise<Blob> => {
-        if (!url) throw new Error("missing media URL");
-        if (!blobByUrl.has(url)) {
-          const response = await fetch(url);
-          if (!response.ok) throw new Error("Cannot read export source.");
-          blobByUrl.set(url, await response.blob());
-        }
-        return blobByUrl.get(url)!;
-      };
-      let maxSourceFps = 0;
-      for (const asset of mediaAssets) {
-        if (asset.type !== "video") continue;
-        let f = asset.sourceFps || 0;
-        if (!f && asset.blobUrl) {
-          // Legacy drafts predate sourceFps — probe cheaply from packet timestamps.
-          try {
-            const input = new Input({
-              source: new BlobSource(await getBlob(asset.blobUrl)),
-              formats: ALL_FORMATS,
-            });
-            try {
-              const vt = await input.getPrimaryVideoTrack();
-              if (!vt) throw new Error("Missing video track");
-              f = (await vt.computeFrameRateMetrics({ targetPacketCount: 128 }))
-                .bestGuessFrameRate;
-            } finally {
-              input.dispose();
-            }
-          } catch {
-            /* keep 0 */
-          }
-        }
-        maxSourceFps = Math.max(maxSourceFps, f);
-      }
-      const fps = exportFrameRate(maxSourceFps);
-      const frameDuration = 1 / fps;
-      const { videoBitrate, audioBitrate } = estimateExport(
-        exportQuality,
-        totalDuration,
-      );
-      // Pre-flight: fail fast with a clear message if this device has no AVC encoder
-      // (same capability-gap class as the AAC encoder — verify codec availability before export).
-      if (
-        !(await canEncodeVideo("avc", {
-          width: targetWidth,
-          height: targetHeight,
-        }))
-      ) {
-        throw new Error(
-          "This device cannot encode AVC video — export is not supported in this environment.",
-        );
-      }
-      addLog(
-        `Target: ${targetWidth}x${targetHeight} @ ${fps}fps, ${Math.round(videoBitrate / 1000)} kbps (${exportQuality.toUpperCase()})`,
-      );
-      addLog(`Splitting workload into 2 parallel threads...`);
-      const mixAudio = async (signal?: AbortSignal): Promise<Uint8Array> => {
-        const offlineCtx = new OfflineAudioContext(
-          2,
-          Math.ceil(Math.max(1, totalDuration * 44100)),
-          44100,
-        );
-        for (const asset of mediaAssets) {
-          signal?.throwIfAborted();
-          if (asset.type !== "video" || !asset.hasAudio || asset.muted)
-            continue;
-          const input = new Input({
-            source: new BlobSource(await getBlob(asset.blobUrl)),
-            formats: ALL_FORMATS,
-          });
-          try {
-            const track = await input.getPrimaryAudioTrack();
-            // Older drafts may not know that a valid video is silent.
-            if (!track) continue;
-            if (!(await track.canDecode()))
-              throw new Error("Unsupported audio codec");
-            const sink = new AudioBufferSink(track);
-            for await (const wrapped of sink.buffers(
-              asset.trimStart,
-              asset.trimStart + asset.duration,
-            )) {
-              signal?.throwIfAborted();
-              const from = Math.max(wrapped.timestamp, asset.trimStart);
-              const to = Math.min(
-                wrapped.timestamp + wrapped.buffer.duration,
-                asset.trimStart + asset.duration,
-              );
-              if (to <= from) continue;
-              const source = offlineCtx.createBufferSource();
-              source.buffer = wrapped.buffer;
-              source.connect(offlineCtx.destination);
-              source.start(
-                asset.startTime + from - asset.trimStart,
-                from - wrapped.timestamp,
-                to - from,
-              );
-            }
-          } catch (error) {
-            throw new Error(
-              `Cannot decode audio for ${asset.name}: ${String(error)}`,
-            );
-          } finally {
-            input.dispose();
-          }
-        }
-        for (const track of audioTracks) {
-          signal?.throwIfAborted();
-          try {
-            const buffer = await offlineCtx.decodeAudioData(
-              await (await getBlob(track.blobUrl)).arrayBuffer(),
-            );
-            const source = offlineCtx.createBufferSource();
-            source.buffer = buffer;
-            source.connect(offlineCtx.destination);
-            source.start(
-              track.startTime,
-              0,
-              Math.min(track.duration, buffer.duration),
-            );
-          } catch (error) {
-            throw new Error(
-              `Cannot decode audio for ${track.name}: ${String(error)}`,
-            );
-          }
-        }
-        signal?.throwIfAborted();
-        return audioBufferToWav(await offlineCtx.startRendering());
-      };
-      const opacityAt = createOpacitySampler(mediaAssets);
-      const renderSegment = async (
-        start: number,
-        end: number,
-        index: number,
-        signal?: AbortSignal,
-      ): Promise<Uint8Array> => {
-        const segmentDuration = end - start;
-        if (segmentDuration <= 0) return new Uint8Array(0);
-        const output = new Output({
-          format: new Mp4OutputFormat({ fastStart: "in-memory" }),
-          target: new BufferTarget(),
-        });
-        const videoSource = new VideoSampleSource({
-          codec: "avc",
-          bitrate: videoBitrate,
-          keyFrameInterval: 4,
-        });
-        output.addVideoTrack(videoSource, { frameRate: fps });
-        const canvas = new OffscreenCanvas(targetWidth, targetHeight);
-        const ctx = canvas.getContext("2d", { alpha: false })!;
-        const sinks = new Map<string, VideoSampleSink>();
-        const images = new Map<string, ImageBitmap>();
-        const inputs: Input[] = [];
-        const relevantAssets = mediaAssets.filter(
-          (a) => a.startTime < end && a.startTime + a.duration > start,
-        );
-        let finalized = false;
-        let passed = 0,
-          composited = 0;
-        try {
-          for (const asset of relevantAssets) {
-            signal?.throwIfAborted();
-            try {
-              const blob = await getBlob(asset.blobUrl);
-              if (asset.type === "image") {
-                images.set(asset.id, await createImageBitmap(blob));
-              } else {
-                // Each timeline clip owns its decoder, even for repeated sources.
-                const input = new Input({
-                  source: new BlobSource(blob),
-                  formats: ALL_FORMATS,
-                });
-                inputs.push(input);
-                const track = await input.getPrimaryVideoTrack();
-                if (!track || !(await track.canDecode()))
-                  throw new Error("Missing or unsupported video track");
-                sinks.set(asset.id, new VideoSampleSink(track));
-              }
-            } catch (error) {
-              throw new Error(`Cannot decode ${asset.name}: ${String(error)}`);
-            }
-          }
-          await output.start();
-          const totalFrames = Math.ceil(segmentDuration * fps);
-          const segmentStarted = performance.now();
-          for (let i = 0; i < totalFrames; i++) {
-            signal?.throwIfAborted();
-            const t = start + i * frameDuration;
-            const outTs = i * frameDuration;
-            const visible = relevantAssets.filter(
-              (a) => t >= a.startTime && t < a.startTime + a.duration,
-            );
-            const decoded = new Map<string, VideoSample>();
-            const frameFor = async (asset: MediaAsset) => {
-              if (decoded.has(asset.id)) return decoded.get(asset.id)!;
-              const sink = sinks.get(asset.id);
-              if (!sink) throw new Error(`Missing decoder for ${asset.name}`);
-              const local = t - asset.startTime + asset.trimStart;
-              const last = asset.originalDuration - asset.trimEnd - 1e-3;
-              const sample = await sink.getSample(
-                Math.max(0, Math.min(local, last)),
-              );
-              if (!sample)
-                throw new Error(
-                  `No decoded frame for ${asset.name} at ${local.toFixed(3)}s`,
-                );
-              decoded.set(asset.id, sample);
-              return sample;
-            };
-            try {
-              let handled = false;
-              if (visible.length === 1) {
-                const asset = visible[0];
-                if (
-                  asset.type === "video" &&
-                  asset.filter === "none" &&
-                  opacityAt(asset, t) === 1
-                ) {
-                  const src = await frameFor(asset);
-                  const par = src.pixelAspectRatio;
-                  if (
-                    src.displayWidth === targetWidth &&
-                    src.displayHeight === targetHeight &&
-                    src.rotation === 0 &&
-                    !src.flip &&
-                    par?.num === 1 &&
-                    par?.den === 1
-                  ) {
-                    src.setTimestamp(outTs);
-                    src.setDuration(frameDuration);
-                    await videoSource.add(src);
-                    handled = true;
-                    passed++;
-                  }
-                }
-              }
-              if (!handled) {
-                // Always reset the entire matte, including contain margins and
-                // frames following a different geometry/filter/transition.
-                ctx.globalAlpha = 1;
-                ctx.filter = "none";
-                ctx.globalCompositeOperation = "source-over";
-                ctx.fillStyle = "#000000";
-                ctx.fillRect(0, 0, targetWidth, targetHeight);
-                ctx.globalCompositeOperation = "lighter";
-                for (const asset of visible) {
-                  ctx.globalAlpha = opacityAt(asset, t);
-                  applyCanvasFilter(ctx, asset.filter);
-                  if (asset.type === "image") {
-                    const image = images.get(asset.id);
-                    if (!image)
-                      throw new Error(`Missing image for ${asset.name}`);
-                    const scale =
-                      fitMode === "cover"
-                        ? Math.max(
-                            targetWidth / image.width,
-                            targetHeight / image.height,
-                          )
-                        : Math.min(
-                            targetWidth / image.width,
-                            targetHeight / image.height,
-                          );
-                    ctx.drawImage(
-                      image,
-                      (targetWidth - image.width * scale) / 2,
-                      (targetHeight - image.height * scale) / 2,
-                      image.width * scale,
-                      image.height * scale,
-                    );
-                  } else {
-                    const sample = await frameFor(asset);
-                    const scale =
-                      fitMode === "cover"
-                        ? Math.max(
-                            targetWidth / sample.displayWidth,
-                            targetHeight / sample.displayHeight,
-                          )
-                        : Math.min(
-                            targetWidth / sample.displayWidth,
-                            targetHeight / sample.displayHeight,
-                          );
-                    sample.draw(
-                      ctx,
-                      (targetWidth - sample.displayWidth * scale) / 2,
-                      (targetHeight - sample.displayHeight * scale) / 2,
-                      sample.displayWidth * scale,
-                      sample.displayHeight * scale,
-                    );
-                  }
-                }
-                ctx.globalAlpha = 1;
-                ctx.filter = "none";
-                ctx.globalCompositeOperation = "source-over";
-                const sample = new VideoSample(canvas, {
-                  timestamp: outTs,
-                  duration: frameDuration,
-                });
-                try {
-                  await videoSource.add(sample);
-                } finally {
-                  sample.close();
-                }
-                composited++;
-              }
-            } finally {
-              decoded.forEach((sample) => sample.close());
-            }
-            if (i % 200 === 199 || i === totalFrames - 1) {
-              const seconds = (performance.now() - segmentStarted) / 1000;
-              addLog(
-                `Thread ${index + 1}: ${i + 1}/${totalFrames} fr | ${passed} passthrough | ${((i + 1) / seconds).toFixed(1)} fps`,
-              );
-            }
-            if (i % 15 === 0) {
-              segmentProgress.current[index] = i / totalFrames;
-              setExportProgress(
-                ((segmentProgress.current[0] + segmentProgress.current[1]) /
-                  2) *
-                  70,
-              );
-              await new Promise((resolve) => setTimeout(resolve, 0));
-            }
-          }
-          videoSource.close();
-          await output.finalize();
-          finalized = true;
-          segmentProgress.current[index] = 1;
-          addLog(
-            `Thread ${index + 1} done: ${passed} passthrough / ${composited} composited frames`,
-          );
-          return new Uint8Array(output.target.buffer!);
-        } finally {
-          if (!finalized) await output.cancel().catch(() => {});
-          images.forEach((image) => image.close());
-          inputs.forEach((input) => input.dispose());
-        }
-      };
-      const mid = Math.round((totalDuration / 2) * fps) / fps;
-      const cancellation = new AbortController();
-      const run = async (work: () => Promise<Uint8Array>) => {
-        try {
-          return await work();
-        } catch (error) {
-          cancellation.abort(error);
-          throw error;
-        }
-      };
-      // A failed branch cancels its siblings; settle their cleanup before a retry.
-      const results = await Promise.allSettled([
-        run(() => renderSegment(0, mid, 0, cancellation.signal)),
-        run(() => renderSegment(mid, totalDuration, 1, cancellation.signal)),
-        run(() => mixAudio(cancellation.signal)),
-      ]);
-      const [chunk1, chunk2, audioData] = results.map((result) => {
-        if (result.status === "rejected") throw result.reason;
-        return result.value;
-      });
-      setExportProgress(70);
-      addLog("PASS 2/4: Concatenating Visual Stream...");
-
-      await ffmpegService.writeFile("seg1.mp4", chunk1);
-      await ffmpegService.writeFile("seg2.mp4", chunk2);
-      await ffmpegService.writeFile("mix.wav", audioData);
-
-      const concatList = "file 'seg1.mp4'\nfile 'seg2.mp4'";
-      await ffmpegService.writeFile(
-        "list.txt",
-        new TextEncoder().encode(concatList),
-      );
-
-      addLog("Merging video segments...");
-      await ffmpegService.exec([
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        "list.txt",
-        "-c",
-        "copy",
-        "-y",
-        "joined.mp4",
-      ]);
-
-      setExportProgress(80);
-      addLog("PASS 3/4: Encoding Master Audio (AAC)...");
-      // AAC encoded here by ffmpeg's software encoder — WebCodecs has none on Android WebView.
-      await ffmpegService.exec([
-        "-i",
-        "joined.mp4",
-        "-i",
-        "mix.wav",
-        "-map",
-        "0:v",
-        "-map",
-        "1:a",
-        "-c:v",
-        "copy",
-        "-c:a",
-        "aac",
-        "-b:a",
-        String(audioBitrate),
-        "-movflags",
-        "+faststart",
-        "-y",
-        "master.mp4",
-      ]);
-
-      setExportProgress(90);
-      addLog("PASS 4/4: Finalizing Master File...");
-      const masterBytes = (await ffmpegService.readFile(
-        "master.mp4",
-      )) as Uint8Array;
-      const b64 = await blobToBase64(
-        new Blob([masterBytes.buffer as ArrayBuffer], { type: "video/mp4" }),
-      );
-
-      setExportProgress(95);
-      addLog(
-        `Final payload: ${(b64.length / 1048576).toFixed(1)} MiB (base64)`,
-      );
-      try {
-        const saved = await Flow.save({
-          base64: b64,
-          mimeType: "video/mp4",
-          name: "clipbraid_video.mp4",
-        });
-        if (saved === false)
-          throw new Error("Save adapter rejected the video.");
-        addLog("EXPORT COMPLETE: save adapter accepted the video");
-        sysLog(
-          "save",
-          `Video handed to save adapter: clipbraid_video.mp4 (${(b64.length / 1048576).toFixed(1)} MiB base64)`,
-        );
-      } catch (e) {
-        throw new Error(
-          `Save rejected (${(masterBytes.byteLength / 1048576).toFixed(1)} MiB video): ${String(e)}`,
-        );
-      }
-
-      setExportProgress(100);
-      sysLog(
-        "export",
-        `Export complete: ${exportQuality}, ${(b64.length / 1048576).toFixed(1)} MiB`,
-      );
-      setStatus("READY");
-    } catch (err) {
-      addLog(`EXPORT FAILED: ${String(err)}`);
-      setStatus("EXPORT ERROR");
-      sysLog("error", `Export failed: ${String(err).slice(0, 200)}`);
-      setExportFailed(true);
-      setErrorDetail(String(err));
-    } finally {
-      // Temp files must be removed even after a failure, or a retry hits
-      // "file exists" errors inside the wasm filesystem.
-      for (const f of [
-        "seg1.mp4",
-        "seg2.mp4",
-        "mix.wav",
-        "list.txt",
-        "joined.mp4",
-        "master.mp4",
-      ]) {
-        try {
-          await ffmpegService.deleteFile(f);
-        } catch {
-          /* already gone or worker reset */
-        }
-      }
-      setIsExporting(false);
-    }
+  const handleExport = () => {
+    if (!mediaAssets.length || exportJobs.getSnapshot().active || !exportJobs.getSnapshot().cleanupComplete) return;
+    setIsPlaying(false);
+    setStatus("EXPORTING...");
+    const exportedProject = editHistory.getSnapshot().project, exportedGeneration = editHistory.generation;
+    const completion = exportJobs.start({ mediaAssets, audioTracks, aspectRatio, fitMode,
+      exportQuality, totalDuration, segmentPreference: singleEncoder ? 1 : 2 });
+    const jobId = exportJobs.getSnapshot().jobId;
+    void completion.then(() => { const state = exportJobs.getSnapshot();
+      if (state.jobId === jobId && state.phase === "complete" && state.result) editHistory.markExported(exportedProject, exportedGeneration);
+    });
   };
   const videos = mediaAssets.filter((asset) => asset.type === "video");
   const allVideoMuted =
     videos.length > 0 && videos.every((asset) => asset.muted);
-  const activeClip = mediaAssets.find(
-    (asset) =>
-      currentTime >= asset.startTime &&
-      currentTime < asset.startTime + asset.duration,
-  );
+  const failedSource = exportState.failure?.asset;
+  const failedSourcePresent = !!failedSource && [...mediaAssets, ...audioTracks].some(asset => asset.id === failedSource.id && asset.sourceId === failedSource.sourceId);
+  const inspectFailedSource = () => {
+    if (!failedSource || !failedSourcePresent) return;
+    exportJobs.dismissFailure();
+    if (failedSource.kind === "audio") {
+      setIsTheaterMode(false); setSelectedAssetId(null);setSelectedAudioId(null);
+      const row = [...(timelineContainerRef.current?.querySelectorAll<HTMLElement>("[data-audio-track]") ?? [])].find(element => element.dataset.audioTrack === failedSource.id);
+      const control = row?.querySelector<HTMLButtonElement>("button");
+      control?.focus(); control?.scrollIntoView({ block: "center", inline: "nearest" });
+    } else selectClip(failedSource.id);
+  };
+  const activeClip = activeIntervals(mediaAssets, currentTime).at(-1);
+  const audioOnly =
+    !activeClip && activeIntervals(audioTracks, currentTime).length > 0;
   const displayTime = (time: number) =>
     `${Math.floor(time / 60)
       .toString()
@@ -1326,21 +1125,37 @@ export default function App() {
   const displayStatus =
     status === "READY"
       ? "Ready"
+      : status === "FATAL ERROR" ? "Media tools unavailable"
+      : status === "BOOTING..." ? "Starting editor…"
       : status.charAt(0) + status.slice(1).toLowerCase();
   return (
-    <div className={`editor-app ${isTheaterMode ? "theater-mode" : ""}`}>
+    <div className={`editor-app ${isTheaterMode ? "theater-mode" : ""}`} data-build-id={BUILD_ID}
+      onPointerDownCapture={beginEditGesture} onPointerUpCapture={endEditGesture} onPointerCancelCapture={endEditGesture}
+      onFocusCapture={beginEditGesture} onBlurCapture={endEditGesture}
+      onKeyDownCapture={event => { if (["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","Home","End"].includes(event.key)) beginEditGesture(event); }} onKeyUpCapture={endEditGesture}>
+      <output hidden id="export-evidence" aria-hidden="true">{JSON.stringify(exportState)}</output>
+      <output hidden id="export-diagnostic-report" aria-hidden="true">{JSON.stringify(createJobReport(exportState))}</output>
       {showIntro && <IntroModal onDismiss={() => setShowIntro(false)} />}
       {showJournal && (
         <JournalViewer
-          entries={journalEntries}
+          reports={jobDiagnostics.reports} warning={jobDiagnostics.warning} onClear={jobDiagnostics.clear}
+          currentJobId={exportState.active ? exportState.jobId : null}
+          currentReport={jobDiagnostics.currentReport}
           onClose={() => setShowJournal(false)}
         />
       )}
+      {pendingProject && <ProjectOpenPrompt filename={pendingProject.name}
+        onCancel={() => setPendingProject(null)}
+        onOpen={() => { const file=pendingProject; setPendingProject(null); void openProjectFile(file); }}
+        onSave={async () => { const file=pendingProject; if(await handleSaveProject() && pendingProjectRef.current===file){setPendingProject(null);await openProjectFile(file);return true}return false }} />}
       <AudioEngine
         audioTracks={audioTracks}
         mediaAssets={mediaAssets}
+        sourceUrl={sourceUrl}
         currentTime={currentTime}
         isPlaying={isPlaying}
+        seekRevision={seekRevision}
+        timeAt={playbackClock.getTime} onPlaybackError={playbackFailure}
       />
       <input
         type="file"
@@ -1361,14 +1176,20 @@ export default function App() {
         <button
           className="brand-lockup"
           onClick={() => setShowIntro(true)}
-          aria-label="About ClipBraid"
+          aria-label={`About ${BRAND.name}`}
         >
           <BrandMark />
           <span>
-            <span className="wordmark">ClipBraid</span>
-            <span className="brand-descriptor">browser video editor</span>
+            <span className="wordmark">{BRAND.name}</span>
+            <span className="brand-descriptor">{BRAND.descriptor}</span>
           </span>
         </button>
+        <div className="project-actions" aria-label="Edit history" title="Undo history is session-local: up to 50 edits and 256 MiB of retained originals. Save a project backup before large changes.">
+          <button className="button secondary" onClick={() => travelHistory("undo")} disabled={!historyState.canUndo || isExporting || isRecording}
+            title={historyState.undoLabel ? `Undo ${historyState.undoLabel}` : "Nothing to undo"}><Icon name="undo" />Undo</button>
+          <button className="button secondary" onClick={() => travelHistory("redo")} disabled={!historyState.canRedo || isExporting || isRecording}
+            title={historyState.redoLabel ? `Redo ${historyState.redoLabel}` : "Nothing to redo"}><Icon name="redo" />Redo</button>
+        </div>
         <div className="project-actions" aria-label="Project actions">
           <button
             className="button quiet"
@@ -1391,6 +1212,7 @@ export default function App() {
         </div>
         <div className="creation-actions" aria-label="Create your video">
           <button
+            ref={addVisualRef}
             className="button secondary"
             onClick={handleImportMedia}
             disabled={isExporting}
@@ -1409,7 +1231,7 @@ export default function App() {
           <button
             className="button primary"
             onClick={handleExport}
-            disabled={!mediaAssets.length || isExporting || isRecording}
+            disabled={!mediaAssets.length || isExporting || isRecording || !exportState.cleanupComplete}
             aria-busy={isExporting}
           >
             <Icon name="download" />
@@ -1417,6 +1239,41 @@ export default function App() {
           </button>
         </div>
       </header>
+      {mediaNotice && <div className="source-notice recovery-notice" data-media-category={mediaNotice.category} role={mediaNotice.category === "cancelled" ? "status" : "alert"}>
+        <span><strong>{mediaNoticeTitle(mediaNotice.category)}</strong> {["project", "relink"].includes(mediaNotice.category) ? mediaNotice.message : ""} {mediaRecovery(mediaNotice.category)}</span>
+        {mediaNotice.deliveryMayHaveStarted && <p>Check your downloads or host files before retrying; a file may already exist.</p>}
+        <details><summary>Technical details</summary><p>{mediaNotice.message}</p></details>
+        <button className="button secondary" onClick={() => setMediaNotice(null)}>Dismiss media message</button>
+      </div>}
+      {jobDiagnostics.warning && <p className="source-notice" role="alert">{jobDiagnostics.warning}</p>}
+      {!exportState.active && !exportState.cleanupComplete && exportState.phase === "idle" && <div className="source-notice recovery-notice" role="alert">
+        <span>Export is blocked because media cleanup failed. Save your project, then reload this page before another export.</span>
+        <button className="button secondary" onClick={() => void handleSaveProject()}>Save project backup</button>
+      </div>}
+      {exportState.result && <p className="source-notice" role="status" data-delivery-outcome={exportState.result.delivery}>
+        {exportState.result.delivery === "download-started" ? "Last export: Download started. Video/audio structure was checked; final disk storage is controlled by your browser." : "Last export: Host accepted the checked video. Host acceptance does not confirm final device storage."}
+      </p>}
+      {exportState.phase === "cancelled" && <div className="source-notice recovery-notice" role="status">
+        <span>Export cancelled. You can keep editing or retry.</span>
+        {mediaAssets.length > 0 ? <button className="button secondary" onClick={handleExport}>Retry export</button> : <span>Add visuals or open a project before exporting again.</span>}
+      </div>}
+      {(recovery.available || recovery.status === "error" || recovery.status === "unavailable") && (
+        <section className="source-notice recovery-notice" aria-label="Local project recovery"
+          role={recovery.status === "error" || recovery.status === "unavailable" ? "alert" : "status"}>
+          <p>{recovery.message || "A committed local draft is available. Restore it, or keep the current project."}</p>
+          {recovery.available ? <>
+            <button className="button primary" onClick={() => void recovery.restore()} disabled={recovery.status === "restoring"}>Restore local revision</button>
+            <button className="button secondary" onClick={recovery.continueCurrent}>Keep current project</button>
+          </> : <button className="button secondary" onClick={() => void recovery.retry()}>Retry local storage</button>}
+        </section>
+      )}
+      {status === "FATAL ERROR" && (
+        <div className="source-notice" role="alert">
+          <span>Media tools could not start. Check your connection and retry; save your project before reloading this page.</span>
+          <button className="button secondary" onClick={() => void loadMediaTools()}>Retry media tools</button>
+          <details><summary>Technical details</summary><p>{errorDetail}</p></details>
+        </div>
+      )}
       {mediaAssets.some(
         (asset) =>
           (asset.sourceWidth ?? 0) > 1280 || (asset.sourceHeight ?? 0) > 1280,
@@ -1424,15 +1281,20 @@ export default function App() {
         <p role="note" className="source-notice">
           <Icon name="info" size={16} />
           Original media retained. Large clips may take more memory and time;
-          optimized proxies are temporarily disabled.
+          optimized previews never change project or export sources.
         </p>
       )}
+      {(playbackState.error||playbackState.notice||playbackState.preparing)&&<section className="source-notice" role={playbackState.error?"alert":"status"}>
+        <p>{playbackState.error||playbackState.notice||"Preparing preview playback…"}</p>
+        {!playbackState.preparing&&<button className="button secondary" onClick={playbackClock.clearError}>Dismiss playback message</button>}
+      </section>}
       <main className="editor-workspace">
         <section className="preview-workspace" aria-label="Video preview">
           <div className="preview-heading">
             <h1>Preview</h1>
             <span className="preview-caption">
-              {activeClip?.name || "Your video starts here"}
+              {activeClip?.name ||
+                (audioOnly ? "Audio only" : "Your video starts here")}
             </span>
             <div
               className="segmented ratio-controls"
@@ -1453,56 +1315,38 @@ export default function App() {
           <div className="preview-stage">
             <MediaPreview
               mediaAssets={mediaAssets}
+              sourceUrl={previewUrl}
               currentTime={currentTime}
               isPlaying={isPlaying}
               aspectRatio={aspectRatio}
               fitMode={fitMode}
               showSafeZones={showSafeZones}
+              seekRevision={seekRevision}
+              timeAt={playbackClock.getTime} onPlaybackError={playbackFailure} registerVideo={playbackClock.registerVideo}
             />
-            {(isExporting || exportFailed) && (
-              <div
-                className="export-overlay"
-                role={exportFailed ? "alert" : undefined}
-              >
-                <div className="export-message">
-                  <Icon name={exportFailed ? "alert" : "video"} size={32} />
-                  <h2>
-                    {exportFailed
-                      ? "Couldn’t export this video"
-                      : "Preparing your video"}
-                  </h2>
-                  {!exportFailed ? (
-                    <>
-                      <p>{Math.round(exportProgress)}% complete</p>
-                      <progress
-                        max="100"
-                        value={exportProgress}
-                        aria-label="Video export progress"
-                      />
-                    </>
-                  ) : (
-                    <p>{errorDetail}</p>
-                  )}
-                  <details className="technical-details">
-                    <summary>Technical details</summary>
-                    <div className="export-log">
-                      {exportLogs.map((log, index) => (
-                        <p key={index}>{log}</p>
-                      ))}
-                    </div>
-                  </details>
-                  {exportFailed && (
-                    <button
-                      className="button primary"
-                      onClick={() => setExportFailed(false)}
-                    >
-                      Back to editing
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
+            {(isExporting || exportFailed) && <ExportFeedback
+              key={exportState.jobId} state={exportState}
+              assetName={failedSource?.name} sourcePresent={failedSource ? failedSourcePresent : undefined} canRetry={mediaAssets.length > 0}
+              onCancel={exportJobs.cancel} onRetry={handleExport} onClose={exportJobs.dismissFailure}
+              onSaveProject={() => void handleSaveProject()}
+              onInspect={failedSourcePresent ? inspectFailedSource : undefined}
+              onReviewAudio={() => { exportJobs.dismissFailure(); setIsTheaterMode(false); setSelectedAssetId(null);setSelectedAudioId(null); setFocusAudioSettings(true); }}
+            />}
           </div>
+          <label className="playhead-control">
+            Playhead
+            <input
+              type="range"
+              aria-label="Playhead time"
+              min="0"
+              max={totalDuration}
+              step="0.01"
+              value={currentTime}
+              aria-valuetext={`${currentTime.toFixed(2)} seconds`}
+              onChange={event => seekTo(Number(event.target.value))}
+              disabled={isExporting}
+            />
+          </label>
           <div className="playback-toolbar">
             <span className="time-readout">
               {displayTime(currentTime)}
@@ -1526,11 +1370,11 @@ export default function App() {
               <button
                 className="play-button"
                 onClick={togglePlayback}
-                aria-label={isPlaying ? "Pause preview" : "Play preview"}
+                aria-label={playbackState.preparing ? "Cancel playback start" : isPlaying ? "Pause preview" : "Play preview"}
                 title="Play/Pause (Space)"
-                disabled={!mediaAssets.length && !audioTracks.length}
+                disabled={isExporting || (!mediaAssets.length && !audioTracks.length)}
               >
-                <Icon name={isPlaying ? "pause" : "play"} size={21} />
+                <Icon name={isPlaying || playbackState.preparing ? "pause" : "play"} size={21} />
               </button>
               <button
                 className="icon-button"
@@ -1569,15 +1413,16 @@ export default function App() {
         {!isTheaterMode && (
           <aside
             className="editor-inspector"
-            aria-label={selectedAsset ? "Clip settings" : "Project settings"}
+            aria-label={selectedAsset ? "Clip settings" : selectedAudio ? "Audio settings" : "Project settings"}
           >
             {selectedAsset ? (
               <>
                 <div className="inspector-heading">
                   <h2>Clip settings</h2>
                   <button
+                    ref={clipSettingsCloseRef}
                     className="icon-button"
-                    onClick={() => setSelectedAssetId(null)}
+                    onClick={closeClipSettings}
                     aria-label="Close clip settings"
                   >
                     <Icon name="close" />
@@ -1598,6 +1443,14 @@ export default function App() {
                     </span>
                   </div>
                 </div>
+                {selectedAsset.type === "image"&&<TimeInput label="Photo duration (seconds)" value={selectedAsset.duration} min={.1} max={MAX_TIMELINE_SECONDS}
+                  onCommit={duration=>setMediaAssets(assets=>sequenceMediaStartTimes(assets.map(asset=>asset.id===selectedAsset.id?resizeImage(asset,duration):asset),transitionDuration),"Change photo duration")} />}
+                {selectedAsset.type === "video" && (
+                  <section className="inspector-section">
+                    {selectedAsset.normalized && <p className="helper-text">This legacy draft may use a reduced source. Relink an original when available.</p>}
+                    <button className="button secondary" onClick={handleRelinkOriginal} disabled={isExporting}>Relink original video</button>
+                  </section>
+                )}
                 <div className="inspector-section">
                   <label htmlFor="clip-filter">Look</label>
                   <select
@@ -1626,6 +1479,12 @@ export default function App() {
                 </div>
                 {selectedAsset.type === "video" && (
                   <>
+                    <div className="inspector-section">
+                      <label htmlFor="clip-volume">Original clip volume<span>{Math.round(trackGain(selectedAsset) * 100)}%</span></label>
+                      <input id="clip-volume" type="range" min="0" max="100" step="1"
+                        value={trackGain(selectedAsset) * 100}
+                        onChange={event => updateSelectedAsset({ gain: Number(event.target.value) / 100 })} />
+                    </div>
                     <div className="inspector-section">
                       <label htmlFor="trim-start">
                         Trim from start
@@ -1747,14 +1606,21 @@ export default function App() {
                   Remove clip
                 </button>
               </>
+            ) : selectedAudio ? (
+              <AudioSettings track={selectedAudio} currentTime={currentTime} closeRef={audioCloseRef}
+                onClose={closeAudioSettings} onRemove={()=>handleDeleteAudio(selectedAudio.id)}
+                onMove={time=>moveAudioTrack(selectedAudio.id,time)}
+                onTrim={change=>changeAudio(selectedAudio.id,"Trim audio",track=>trimAudio(track,change))}
+                onGain={gain=>changeAudio(selectedAudio.id,"Change audio volume",track=>({...track,gain}))} />
             ) : (
               <>
                 <div className="inspector-heading">
                   <h2>Make it yours</h2>
                   <Icon name="settings" />
                 </div>
-                <section className="inspector-section">
+                <section className="inspector-section audio-settings" ref={audioSettingsRef} tabIndex={-1} aria-label="Audio levels">
                   <h3>Your soundtrack</h3>
+                  {soundPolicy.maxOverlap > 0 && <p className="helper-text">Mix level: {Math.round(soundPolicy.gain * 100)}%. Headroom reserves space for up to {soundPolicy.maxOverlap} enabled sounds at once.</p>}
                   <p className="helper-text">
                     Layer music, narration and other audio. Each file gets its
                     own track.
@@ -1775,6 +1641,18 @@ export default function App() {
                     Choose audio from gallery
                     <Icon name="right" size={14} />
                   </button>
+                  {audioTracks.map((track, index) => (
+                    <div className="track-level" key={track.id}><label className="track-volume">
+                      <span>{track.name} · {Math.round(trackGain(track) * 100)}%</span>
+                      <input type="range" min="0" max="100" step="1"
+                        aria-label={`Volume for audio ${index + 1}: ${track.name}`}
+                        value={trackGain(track) * 100}
+                        onChange={event => {
+                          const gain = Number(event.target.value) / 100;
+                          setAudioTracks(previous => previous.map(value => value.id === track.id ? { ...value, gain } : value));
+                        }} />
+                    </label><button className="text-button" data-audio-edit={track.id} onClick={()=>selectAudio(track.id)}>Edit audio {index+1}</button></div>
+                  ))}
                 </section>
                 <section className="inspector-section">
                   <div className="switch-row">
@@ -1825,6 +1703,8 @@ export default function App() {
                 </section>
                 <section className="inspector-section">
                   <h3>Export quality</h3>
+                  <label><input type="checkbox" checked={singleEncoder} onChange={event => setSingleEncoder(event.target.checked)} />Compatibility render (one encoder)</label>
+                  <p className="helper-text">Draft: smaller 480p video. Standard: 720p. High: 720p with a higher bitrate and larger estimated file.</p>
                   <div className="segmented">
                     {(["draft", "standard", "high"] as ExportQuality[]).map(
                       (quality) => (
@@ -1842,6 +1722,37 @@ export default function App() {
                     ~{exportEstimate.estimatedMiB.toFixed(1)} MiB estimated ·
                     actual size varies
                   </p>
+                  <p className="helper-text">Video handoff is capped at 96 MiB; host limits may be lower.</p>
+                  <details className="profile-details"><summary>Export profile details</summary>
+                    <p className="helper-text">Export uses up to 30 fps, square pixels and SDR color. Framing, resizing and frame-rate conversion may change the source appearance.</p>
+                    <p className="helper-text">{Math.round(exportEstimate.videoBitrate / 1000)} kb/s video + {Math.round(exportEstimate.audioBitrate / 1000)} kb/s audio. Estimated base64 handoff: ~{exportEstimate.base64MiB.toFixed(1)} MiB.</p>
+                  </details>
+                  {exportEstimate.estimatedBytes > 96 * 1048576 && <p className="helper-text">This estimate exceeds the delivery cap. Consider a lower profile or shorter timeline; actual bytes are checked before delivery.</p>}
+                </section>
+                {videos.length > 0 && (
+                  <section className="inspector-section" aria-label="Preview optimization">
+                    <h3>Preview performance</h3>
+                    <p className="helper-text" role="status">
+                      {proxyState.filter(job => job.status === "ready").length} optimized previews.
+                      {proxyState.some(job => job.status === "running") ? " Optimizing preview…" :
+                        proxyState.some(job => job.status === "queued") ? (previewWorkPaused ? " Preview optimization is paused." : " Optimization queued.") : ""}
+                      {" "}Project files, original sound and exports use your originals.
+                    </p>
+                    <button className="button secondary" onClick={() => proxyQueue.request(mediaAssets)} disabled={isExporting || !exportState.cleanupComplete}>Optimize previews</button>
+                    {proxyState.some(job => job.status === "queued" || job.status === "running") &&
+                      <button className="button secondary" onClick={proxyQueue.cancel}>Cancel optimization</button>}
+                    {proxyState.filter(job => job.status === "failed").map(job => <div key={job.sourceId}>
+                      <p className="helper-text">Could not optimize “{job.name}”. Original media is retained. Continue editing or try optimization again.</p>
+                      <details><summary>Optimization details</summary><p className="helper-text">{job.error}</p></details>
+                    </div>)}
+                  </section>
+                )}
+                <section className="inspector-section" aria-label="Local draft storage">
+                  <h3>Local drafts</h3>
+                  <p className="helper-text">Local autosave stays in this browser. Save project downloads a separate file. Browser data can be removed externally.</p>
+                  <p className="helper-text">{(recovery.usage.bytes / 1048576).toFixed(1)} MiB in {recovery.usage.revisions} local revision(s). Keeps up to two revisions within 128 MiB.</p>
+                  {recovery.quota && <p className="helper-text">Browser quota estimate: {(recovery.quota / 1048576).toFixed(0)} MiB.</p>}
+                  <button className="button secondary" onClick={() => void recovery.cleanOlder()} disabled={!recovery.revision || recovery.status === "saving"}>Remove older local revisions</button>
                 </section>
                 <details className="recorder">
                   <summary>
@@ -1871,6 +1782,10 @@ export default function App() {
                     <Icon name="mic" />
                     {isRecording ? "Recording…" : "Start recording"}
                   </button>
+                  {isRecording && <>
+                    <button className="button secondary" onClick={() => recordingRef.current?.stop.abort()}>Stop recording and keep audio</button>
+                    <button className="button secondary" onClick={() => recordingRef.current?.cancel.abort()}>Cancel recording</button>
+                  </>}
                 </details>
                 <p className="inspector-tip">
                   Select a clip in the timeline to trim it, change its look or
@@ -1906,28 +1821,44 @@ export default function App() {
           </label>
         </div>
         <Timeline
+          key={editHistory.generation}
           mediaAssets={mediaAssets}
           audioTracks={audioTracks}
           currentTime={currentTime}
           zoom={zoom}
           selectedAssetId={selectedAssetId}
+          selectedAudioId={selectedAudioId}
           onSeek={seekTo}
           onDeleteMedia={handleDeleteMedia}
           onDeleteAudio={handleDeleteAudio}
           onMoveMedia={handleMoveMedia}
           onToggleMute={handleToggleMute}
-          onSelectAsset={setSelectedAssetId}
+          onSelectAsset={selectClip}
+          onSelectAudio={selectAudio}
+          onMoveAudio={moveAudioTrack}
+          onBeginAudioMove={()=>{editHistory.beginGroup(true);setIsPlaying(false)}}
+          onEndAudioMove={()=>editHistory.endGroup()}
         />
       </section>
       <footer className="editor-statusbar">
         <span
-          role="status"
-          aria-live="polite"
+          role={status.includes("ERROR") ? "alert" : "status"}
+          aria-live={status.includes("ERROR") ? "assertive" : "polite"}
           data-editor-status={status}
           className={status.includes("ERROR") ? "status-error" : ""}
         >
           <span className="status-dot" />
           {displayStatus}
+        </span>
+        <span className="autosave-summary" role="status" data-autosave-status={recovery.status}>
+          {recovery.status === "saved" ? `Saved locally · revision ${recovery.revision}` :
+            recovery.status === "saving" ? "Saving locally…" : recovery.status === "choice" ? "Local recovery available" :
+            recovery.status === "unavailable" ? "Local autosave unavailable" : "Unsaved local changes"}
+        </span>
+        <span className="project-backup-status" role="status" data-project-dirty={historyState.dirty}>
+          {historyState.dirty ? "Project file: unsaved edits" : "Project file: no unsaved edits"}
+          {historyState.limited && " · Older undo history removed at its limit"}
+          {historyState.exported ? " · Current edits exported" : " · Export not current"}
         </span>
         <span className="status-hint">
           Audio files start at the playhead. Add several to layer them.

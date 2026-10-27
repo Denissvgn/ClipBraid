@@ -1,0 +1,10 @@
+{
+  "name": "ClipBraid",
+  "descriptor": "browser video editor",
+  "tagline": "Your clips. Your sound.",
+  "description": "Combine videos and photos, layer your own audio, and choose which original sounds stay. An experimental browser video editor.",
+  "themeColor": "#183b37",
+  "favicon": "/assets/clipbraid.svg",
+  "projectPrefix": "clipbraid_project",
+  "videoFilename": "clipbraid_video.mp4"
+}

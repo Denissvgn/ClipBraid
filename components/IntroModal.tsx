@@ -1,16 +1,13 @@
-import React, { useEffect, useRef } from "react";
+import React from "react";
+import { useModalDialog } from "./useModalDialog";
 import { BrandMark } from "./BrandMark";
 import { Icon } from "./Icon";
+import { BRAND, APP_VERSION } from "../services/brand";
 
 export const IntroModal: React.FC<{ onDismiss: () => void }> = ({
   onDismiss,
 }) => {
-  const dialog = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    const el = dialog.current;
-    el?.showModal();
-    return () => el?.close();
-  }, []);
+  const dialog = useModalDialog();
   return (
     <dialog
       ref={dialog}
@@ -20,12 +17,10 @@ export const IntroModal: React.FC<{ onDismiss: () => void }> = ({
     >
       <div className="intro-brand">
         <BrandMark size={36} />
-        <span className="wordmark">ClipBraid</span>
+        <span className="wordmark">{BRAND.name}</span>
       </div>
       <h1 id="intro-title">
-        Your clips.
-        <br />
-        Your sound.
+        {BRAND.tagline}
       </h1>
       <p>
         Bring videos and photos together. Layer your own audio, and choose which
@@ -49,7 +44,11 @@ export const IntroModal: React.FC<{ onDismiss: () => void }> = ({
         </div>
       </div>
       <p className="intro-note">
-        Experimental editor. Keep your originals and save your project as you
+        Save project keeps an editable JSON file with your media and edits.
+        Export video makes an MP4 to watch or share.
+      </p>
+      <p className="intro-note">
+        Version {APP_VERSION}. Experimental editor. Keep your originals and save your project as you
         work.
       </p>
       <button

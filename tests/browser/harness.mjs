@@ -1,8 +1,13 @@
 import { test as base, expect } from '@playwright/test';
 import { createHash } from 'node:crypto';
+import { sourceIdentity } from '../../scripts/source-identity.mjs';
+import { readFileSync } from 'node:fs';
+const expectedSource = sourceIdentity().sha256;
+const expectedBrowser=JSON.parse(readFileSync('node_modules/playwright-core/browsers.json')).browsers.find(browser=>browser.name==='chromium').browserVersion;
 export { expect };
 export const test=base.extend({
   context:async({context},use,info)=>{
+    expect(context.browser()?.version()).toBe(expectedBrowser);
     const resources=[];const pending=[];
     context.on('response',response=>{
       const request=response.request();
@@ -11,7 +16,14 @@ export const test=base.extend({
     });
     try{await use(context);}finally{
       await Promise.all(pending);
-      await info.attach('served-resources',{body:JSON.stringify({browser:context.browser()?.version(),resources},null,2),contentType:'application/json'});
+      await info.attach('served-resources',{body:JSON.stringify({browser:context.browser()?.version(),expectedSource,resources},null,2),contentType:'application/json'});
     }
   },
+});
+test.afterEach(async ({page},info)=>{
+  const app = page.locator('.editor-app');
+  if(await app.count()) {
+    const mode = info.project.testDir.replaceAll('\\', '/').endsWith('/production') ? 'production' : 'test';
+    expect(await app.getAttribute('data-build-id')).toBe(`${expectedSource}:${mode}`);
+  }
 });

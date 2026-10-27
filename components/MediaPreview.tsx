@@ -2,29 +2,41 @@ import React, { useMemo } from "react";
 import { MediaAsset } from "../types";
 import { MediaItemPreview } from "./MediaItemPreview";
 import { Icon } from "./Icon";
-import { createOpacitySampler } from "../services/timeline";
+import type { PlaybackClock } from "../services/playbackClock";
+import {
+  createOpacitySampler,
+  intervalsOverlap,
+  isIntervalActive,
+} from "../services/timeline";
 interface MediaPreviewProps {
   mediaAssets: MediaAsset[];
+  /** Resolves a source ID to its live object URL (media source store). */
+  sourceUrl: (sourceId: string) => string | undefined;
   currentTime: number;
   isPlaying: boolean;
   aspectRatio: "16:9" | "9:16" | "1:1";
   fitMode: "contain" | "cover";
   showSafeZones: boolean;
+  seekRevision?: number;
+  timeAt?: () => number;
+  onPlaybackError?: (message: string) => void;
+  registerVideo?: PlaybackClock["registerVideo"];
 }
 export const MediaPreview: React.FC<MediaPreviewProps> = ({
   mediaAssets,
+  sourceUrl,
   currentTime,
   isPlaying,
   aspectRatio,
   fitMode,
   showSafeZones,
+  seekRevision = 0,
+  timeAt,onPlaybackError,registerVideo,
 }) => {
   const mountedAssets = useMemo(
     () =>
-      mediaAssets.filter(
-        (asset) =>
-          currentTime >= asset.startTime - 2 &&
-          currentTime <= asset.startTime + asset.duration + 2,
+      mediaAssets.filter((asset) =>
+        intervalsOverlap(asset, currentTime - 2, currentTime + 2),
       ),
     [mediaAssets, currentTime],
   );
@@ -44,11 +56,11 @@ export const MediaPreview: React.FC<MediaPreviewProps> = ({
             <Icon name="video" size={34} />
             <Icon name="music" size={22} />
           </div>
-          <h2>A place for your next video</h2>
+          <h2>Add visuals to start your video</h2>
           <p>
             Add video clips or photos to begin.
             <br />
-            Your audio gets its own space below.
+            Add audio for music or narration on separate tracks.
           </p>
         </div>
       ) : (
@@ -65,16 +77,15 @@ export const MediaPreview: React.FC<MediaPreviewProps> = ({
             <MediaItemPreview
               key={asset.id}
               asset={asset}
+              url={sourceUrl(asset.sourceId)}
               currentTime={currentTime}
               isPlaying={isPlaying}
               fitMode={fitMode}
               opacity={calculateOpacity(asset)}
-              zIndex={
-                currentTime >= asset.startTime &&
-                currentTime < asset.startTime + asset.duration
-                  ? 2
-                  : 1
-              }
+              zIndex={isIntervalActive(asset, currentTime) ? 2 : 1}
+              seekRevision={seekRevision}
+              timeAt={timeAt} onPlaybackError={onPlaybackError} registerVideo={registerVideo}
+              opacityAt={sampleOpacity}
             />
           ))}
           {showSafeZones && (

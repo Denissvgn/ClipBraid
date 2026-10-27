@@ -4,6 +4,8 @@ build/
 public/*.json
 *.log
 .DS_Store
+__pycache__/
+*.py[cod]
 
 # Local qualification evidence and generated browser artifacts
 /reports/
@@ -26,6 +28,9 @@ public/*.json
 *.mdx
 !/README.md
 !/THIRD_PARTY_NOTICES.md
+!/guides/using-clipbraid.md
+!/guides/support.md
+!/guides/upgrading.md
 /docs/
 /notes/
 /plans/

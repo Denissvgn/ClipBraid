@@ -1,0 +1,276 @@
+import type { MediaAsset, VisualFilter } from "../types";
+import { activeIntervals, canvasFit, createOpacitySampler, frameCount, frameTimestamp, intervalsOverlap, isIntervalActive, sourceTimeAt } from "./timeline";
+import { Input, Output, Mp4OutputFormat, BufferTarget, BlobSource, ALL_FORMATS, VideoSampleSource, VideoSample, VideoSampleSink } from "mediabunny";
+export interface RenderSettings { targetWidth: number; targetHeight: number; videoBitrate: number; fps: number; frameDuration: number; fitMode: "contain" | "cover"; frameStart?: number; frameEnd?: number; hardwareAcceleration?: "no-preference" | "prefer-software" }
+const applyCanvasFilter = (
+  ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D,
+  filter: VisualFilter,
+) => {
+  switch (filter) {
+    case "grayscale":
+      ctx.filter = "grayscale(100%)";
+      break;
+    case "sepia":
+      ctx.filter = "sepia(100%)";
+      break;
+    case "noir":
+      ctx.filter = "grayscale(100%) contrast(150%) brightness(80%)";
+      break;
+    case "vintage":
+      ctx.filter = "sepia(50%) contrast(90%) brightness(110%) saturate(80%)";
+      break;
+    case "warm":
+      ctx.filter = "sepia(30%) saturate(120%) brightness(105%)";
+      break;
+    case "cool":
+      ctx.filter = "hue-rotate(180deg) saturate(80%) brightness(105%)";
+      break;
+    default:
+      ctx.filter = "none";
+      break;
+  }
+};
+
+
+export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettings,
+  getBlob: (id: string) => Promise<Blob>, addLog: (message: string) => void,
+  setExportProgress: (value: number) => void, notify?: (point: Record<string, unknown>) => void) {
+  const { targetWidth, targetHeight, videoBitrate, fps, frameDuration, fitMode } = settings;
+  const opacityAt = createOpacitySampler(mediaAssets);
+  const segmentProgress = { current: [0, 0] };
+  const renderSegment = async (
+  start: number,
+  end: number,
+  index: number,
+  signal?: AbortSignal,
+): Promise<Uint8Array> => {
+  const segmentDuration = end - start;
+  if (segmentDuration <= 0) return new Uint8Array(0);
+  const totalFrames = settings.frameStart === undefined ? frameCount(segmentDuration, fps) : settings.frameEnd! - settings.frameStart;
+  const timelineTime = (i: number) => settings.frameStart === undefined ? frameTimestamp(i, fps, start) : frameTimestamp(settings.frameStart + i, fps);
+  const output = new Output({
+    format: new Mp4OutputFormat({ fastStart: "in-memory" }),
+    target: new BufferTarget(),
+  });
+  const videoSource = new VideoSampleSource({
+    codec: "avc",
+    bitrate: videoBitrate,
+    keyFrameInterval: 4,
+    hardwareAcceleration: settings.hardwareAcceleration ?? "no-preference",
+  });
+  output.addVideoTrack(videoSource, { frameRate: fps });
+  const canvas = new OffscreenCanvas(targetWidth, targetHeight);
+  const ctx = canvas.getContext("2d", { alpha: false, colorSpace: "srgb" })!;
+  const sinks = new Map<string, VideoSampleSink>();
+  const streams = new Map<string, { input: Input; times: number[]; resolution: number; remaining: number; iterator?: AsyncIterator<VideoSample | null>; closed: boolean }>();
+  const activeInputs = new Set<Input>();
+  const images = new Map<string, ImageBitmap>();
+  const inputs: Input[] = [];
+  const trace = (operation: string, point: Record<string, unknown> = {}) => {
+    if (typeof notify === "function") notify({ operation, segment: index, inputs: activeInputs.size, images: images.size, ...point });
+  };
+  const relevantAssets = mediaAssets.filter((asset) =>
+    intervalsOverlap(asset, start, end),
+  );
+  let finalized = false;
+  let passed = 0,
+    composited = 0;
+  try {
+    for (const asset of relevantAssets) {
+      signal?.throwIfAborted();
+      try {
+        const blob = await getBlob(asset.sourceId);
+        if (asset.type === "image") {
+          images.set(asset.id, await createImageBitmap(blob));
+        } else {
+          // Each timeline clip owns its decoder, even for repeated sources.
+          const input = new Input({
+            source: new BlobSource(blob),
+            formats: ALL_FORMATS,
+          });
+          inputs.push(input);
+          activeInputs.add(input);
+          const track = await input.getPrimaryVideoTrack();
+          if (!track || !(await track.canDecode()))
+            throw new Error("Missing or unsupported video track");
+          const resolution = await track.getTimeResolution();
+          if (!Number.isFinite(resolution) || resolution <= 0) throw new Error("Invalid video time resolution");
+          sinks.set(asset.id, new VideoSampleSink(track));
+          const times: number[] = [];
+          for (let frame = 0; frame < totalFrames; frame++) if (isIntervalActive(asset, timelineTime(frame))) times.push(sourceTimeAt(asset, timelineTime(frame), resolution));
+          streams.set(asset.id, { input, times, resolution, remaining: times.length, closed: false });
+        }
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason;
+        throw Object.assign(new Error(`Cannot decode ${asset.name}: ${String(error)}`), { category: "asset", assetId: asset.id });
+      }
+    }
+    await output.start();
+    const segmentStarted = performance.now();
+    for (let i = 0; i < totalFrames; i++) {
+      signal?.throwIfAborted();
+      const t = timelineTime(i);
+      const outTs = frameTimestamp(i, fps);
+      const visible = activeIntervals(relevantAssets, t);
+      const decoded = new Map<string, VideoSample>();
+      const frameFor = async (asset: MediaAsset) => {
+        if (decoded.has(asset.id)) return decoded.get(asset.id)!;
+        const sink = sinks.get(asset.id);
+        const stream = streams.get(asset.id);
+        if (!sink || !stream) throw new Error(`Missing decoder for ${asset.name}`);
+        const local = sourceTimeAt(asset, t, stream.resolution);
+        trace("decode-request", { clipId: asset.id, sourceTime: local, timelineTime: t, frame: i, liveSamples: decoded.size });
+            if (i === 0) addLog("Decoding visual media");
+        // This iterator owns one decoder for the clip's monotonic frame grid.
+        // getSample() per frame would create/restart a decoder for every query.
+        stream.iterator ??= sink.samplesAtTimestamps(stream.times)[Symbol.asyncIterator]();
+        let next;
+        try { next = await stream.iterator.next(); }
+        catch (error) {
+          if (signal?.aborted) throw signal.reason;
+          throw Object.assign(new Error(`Cannot decode ${asset.name}: ${String(error)}`), { category: "asset", assetId: asset.id });
+        }
+        const sample = next.value;
+        stream.remaining--;
+        trace("decode-ready", { clipId: asset.id, sourceTime: local, timelineTime: t, frame: i, sampleTimestamp: sample?.timestamp });
+        if (!sample)
+          throw Object.assign(new Error(`No decoded frame for ${asset.name} at ${local.toFixed(3)}s`), { category: "asset", assetId: asset.id });
+        decoded.set(asset.id, sample);
+        return sample;
+      };
+      try {
+        let handled = false;
+        if (visible.length === 1) {
+          const asset = visible[0];
+          if (
+            asset.type === "video" &&
+            asset.filter === "none" &&
+            opacityAt(asset, t) === 1
+          ) {
+            const src = await frameFor(asset);
+            const par = src.pixelAspectRatio;
+            if (
+              src.displayWidth === targetWidth &&
+              src.displayHeight === targetHeight &&
+              src.rotation === 0 &&
+              !src.flip &&
+              // AVC discards alpha instead of applying our matte. Unknown or
+              // alpha-bearing formats must use the cleared canvas path.
+              ["I420", "I422", "I444", "NV12", "RGBX", "BGRX", "I420P10", "I422P10", "I444P10"].includes(src.format ?? "") &&
+              par?.num === 1 &&
+              par?.den === 1
+            ) {
+              src.setTimestamp(outTs);
+              src.setDuration(frameDuration);
+                  if (i === 0) addLog("Encoding visual media");
+                  trace("encode-request", { clipId: asset.id, frame: i, timelineTime: t });
+                  await videoSource.add(src);
+                  trace("encode-ready", { frame: i });
+              handled = true;
+              passed++;
+            }
+          }
+        }
+        if (!handled) {
+          // Always reset the entire matte, including contain margins and
+          // frames following a different geometry/filter/transition.
+          ctx.globalAlpha = 1;
+          ctx.filter = "none";
+          ctx.globalCompositeOperation = "source-over";
+          ctx.fillStyle = "#000000";
+          ctx.fillRect(0, 0, targetWidth, targetHeight);
+          ctx.globalCompositeOperation = "lighter";
+          for (const asset of visible) {
+            ctx.globalAlpha = opacityAt(asset, t);
+            applyCanvasFilter(ctx, asset.filter);
+            if (asset.type === "image") {
+              const image = images.get(asset.id);
+              if (!image)
+                throw new Error(`Missing image for ${asset.name}`);
+              const fit = canvasFit(
+                image.width,
+                image.height,
+                targetWidth,
+                targetHeight,
+                fitMode,
+              );
+              ctx.drawImage(
+                image,
+                fit.x,
+                fit.y,
+                fit.width,
+                fit.height,
+              );
+            } else {
+              const sample = await frameFor(asset);
+              const fit = canvasFit(
+                sample.displayWidth,
+                sample.displayHeight,
+                targetWidth,
+                targetHeight,
+                fitMode,
+              );
+              sample.draw(ctx, fit.x, fit.y, fit.width, fit.height);
+            }
+          }
+          ctx.globalAlpha = 1;
+          ctx.filter = "none";
+          ctx.globalCompositeOperation = "source-over";
+          const sample = new VideoSample(canvas, {
+            timestamp: outTs,
+            duration: frameDuration,
+          });
+          try {
+                if (i === 0) addLog("Encoding visual media");
+                trace("encode-request", { frame: i, timelineTime: t });
+                await videoSource.add(sample);
+                trace("encode-ready", { frame: i });
+          } finally {
+            sample.close();
+          }
+          composited++;
+        }
+      } finally {
+        decoded.forEach((sample) => sample.close());
+        for (const [id, stream] of streams) if (!stream.closed && stream.remaining === 0) {
+          await stream.iterator?.return?.(); stream.input.dispose(); activeInputs.delete(stream.input); stream.closed = true;
+          trace("input-released", { clipId: id });
+        }
+      }
+      if (i % 200 === 199 || i === totalFrames - 1) {
+        const seconds = (performance.now() - segmentStarted) / 1000;
+        addLog(
+          `Thread ${index + 1}: ${i + 1}/${totalFrames} fr | ${passed} passthrough | ${((i + 1) / seconds).toFixed(1)} fps`,
+        );
+      }
+      if (i % 15 === 0) {
+        segmentProgress.current[index] = i / totalFrames;
+        setExportProgress(
+          ((segmentProgress.current[0] + segmentProgress.current[1]) /
+            2) *
+            70,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    }
+    videoSource.close();
+    trace("finalize-request");
+        addLog("Finalizing visual stream");
+    await output.finalize();
+    trace("finalize-ready");
+    finalized = true;
+    segmentProgress.current[index] = 1;
+    addLog(
+      `Thread ${index + 1} done: ${passed} passthrough / ${composited} composited frames`,
+    );
+    return new Uint8Array(output.target.buffer!);
+  } finally {
+    for (const stream of streams.values()) await stream.iterator?.return?.();
+    if (!finalized) await output.cancel().catch(() => {});
+    images.forEach((image) => image.close());
+    inputs.forEach((input) => input.dispose());
+  }
+};
+
+  return renderSegment;
+}

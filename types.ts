@@ -1,9 +1,11 @@
 export type VisualFilter =
   "none" | "grayscale" | "sepia" | "noir" | "vintage" | "warm" | "cool";
 export interface MediaAsset {
-  id: string;
+  id: string; // timeline clip instance ID; edit state is per instance
   mediaId: string;
-  base64: string;
+  /** Runtime identity of the immutable original; resolved via the media
+   *  source store. Not part of the serialized project format. */
+  sourceId: string;
   mimeType: string;
   type: "image" | "video";
   name: string;
@@ -13,10 +15,10 @@ export interface MediaAsset {
   trimStart: number; // offset from start in seconds
   trimEnd: number; // offset from end in seconds
   filter: VisualFilter;
-  blobUrl?: string; // High-performance URL for preview
   transitionDuration?: number; // Duration of the crossfade with the PREVIOUS clip
   hasAudio: boolean; // Detected audio stream presence
   muted?: boolean; // User-controlled mute state for original clip audio
+  gain?: number; // Linear original-audio volume, 0–1; omitted legacy value is unity
   sourceFps?: number; // Detected source frame rate; retained within the 12–30 fps export range
   sourceWidth?: number; // Native coded width of the retained source
   sourceHeight?: number; // Native coded height of the retained source
@@ -25,10 +27,15 @@ export interface MediaAsset {
 export interface AudioFragment {
   id: string;
   mediaId: string;
-  base64: string;
+  /** Runtime identity of the immutable original; see MediaAsset.sourceId. */
+  sourceId: string;
   mimeType: string;
   name: string;
   startTime: number; // position on timeline in seconds
   duration: number; // in seconds
-  blobUrl?: string; // High-performance URL for preview
+  /** Optional in older projects; duration was the whole source window. */
+  originalDuration?: number;
+  trimStart?: number;
+  trimEnd?: number;
+  gain?: number; // Linear track volume, 0–1; zero is intentional silence
 }

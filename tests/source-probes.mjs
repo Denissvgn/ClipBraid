@@ -2,6 +2,7 @@
 // their closure inputs explicitly. Fail on missing/ambiguous AST boundaries.
 import ts from "typescript";
 import { readFileSync } from "node:fs";
+import * as reportPolicy from "../services/reportPolicy.mjs";
 export function expression(file, name) {
   const text = readFileSync(file, "utf8");
   const tree = ts.createSourceFile(
@@ -45,12 +46,24 @@ export function evaluate(file, name, scope = {}) {
 }
 
 // Load a dependency-free production module; type-only imports are erased.
-export function loadModule(file) {
+export function loadModule(file, imports = {}) {
   const source = ts.transpile(readFileSync(file, "utf8"), {
     target: ts.ScriptTarget.ES2022,
     module: ts.ModuleKind.CommonJS,
   });
   const exports = {};
-  new Function("exports", source)(exports);
+  new Function("exports", "require", source)(exports, name => {
+    if (!(name in imports)) throw new Error(`Missing test module dependency: ${name}`);
+    return imports[name];
+  });
   return exports;
+}
+
+export function loadDelivery(platform) {
+  const errors = loadModule("services/platformError.ts");
+  const receipts = loadModule("services/saveReceipt.ts", { "./platformError": errors });
+  return loadModule("services/delivery.ts", { "../platform": platform, "./saveReceipt": receipts });
+}
+export function loadDiagnostics() {
+  return loadModule("services/diagnostics.ts", { "./reportPolicy.mjs": reportPolicy });
 }

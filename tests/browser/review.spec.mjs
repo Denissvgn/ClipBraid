@@ -82,6 +82,49 @@ test("restored playhead uses the new project duration and long-project size is h
   await expect(page.getByText(/MB target/)).toHaveCount(0);
 });
 
+test("deleting a clip clamps a paused playhead to the shortened project", async ({
+  page,
+}) => {
+  await openEditor(page);
+  const first = await asset("landscape-red.png", { duration: 2 });
+  const second = await asset("portrait-blue.png", {
+    id: "visual-2",
+    name: "second.png",
+    startTime: 2,
+    duration: 2,
+  });
+  await loadDraft(page, { ...draft([first, second]), currentTime: 3.5 });
+  await page
+    .getByRole("button", { name: "Edit landscape-red.png", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Remove clip", exact: true }).click();
+  expect((await saveDraft(page)).currentTime).toBe(2);
+});
+
+test("an audio tail has an explicit preview state and determines duration", async ({
+  page,
+}) => {
+  await openEditor(page);
+  const visual = await asset("landscape-red.png", { duration: 1 });
+  const audio = {
+    id: "audio-tail",
+    mediaId: "audio-tail",
+    name: "Tone",
+    mimeType: "audio/wav",
+    base64: (await readFile("tests/fixtures/tone-impulses.wav")).toString(
+      "base64",
+    ),
+    startTime: 0,
+    duration: 3,
+  };
+  await loadDraft(page, {
+    ...draft([visual], [audio]),
+    currentTime: 2,
+  });
+  await expect(page.locator(".preview-caption")).toHaveText("Audio only");
+  expect((await saveDraft(page)).currentTime).toBe(2);
+});
+
 test("replacing a project with the same clip ID replaces its audio source and pauses playback", async ({
   page,
 }) => {
@@ -114,7 +157,7 @@ test("replacing a project with the same clip ID replaces its audio source and pa
       ),
     )
     .toEqual([
-      { url: "", paused: true },
+      { url: null, paused: true },
       { url: current, paused: true },
     ]);
 });
@@ -212,6 +255,8 @@ test("rejected and false save acknowledgements stay failed and permit a clean re
         window.saveCalls++;
         if (window.saveMode === "reject")
           throw new Error("injected save rejection");
+        if (window.saveMode === "null") return null;
+        if (window.saveMode === "undefined") return undefined;
         return false;
       },
     };
@@ -221,7 +266,7 @@ test("rejected and false save acknowledgements stay failed and permit a clean re
   await page.getByRole("button", { name: "draft", exact: true }).click();
   let downloads = 0;
   page.on("download", () => downloads++);
-  for (const mode of ["reject", "false"]) {
+  for (const mode of ["reject", "false", "null", "undefined"]) {
     await page.evaluate((mode) => {
       window.saveMode = mode;
     }, mode);
@@ -235,7 +280,7 @@ test("rejected and false save acknowledgements stay failed and permit a clean re
       page.getByRole("button", { name: "Export video", exact: true }),
     ).toBeEnabled();
   }
-  expect(await page.evaluate(() => window.saveCalls)).toBe(2);
+  expect(await page.evaluate(() => window.saveCalls)).toBe(4);
   expect(downloads).toBe(0);
 });
 
@@ -287,16 +332,20 @@ test("preview and encoded crossfades preserve brightness throughout the overlap"
     async ({ clips, render, filter }) => {
       const m = window.testRuntime.media,
         timeline = window.testRuntime.timeline;
-      for (const clip of clips)
-        clip.blobUrl = URL.createObjectURL(
+      for (const clip of clips) clip.sourceId = clip.id;
+      const clipBlobs = new Map(
+        clips.map((clip) => [
+          clip.id,
           new Blob(
             [Uint8Array.from(atob(clip.base64), (c) => c.charCodeAt(0))],
             { type: clip.mimeType },
           ),
-        );
+        ]),
+      );
       const opacityAt = timeline.createOpacitySampler(clips);
       const scope = {
         ...m,
+        settings: {},
         mediaAssets: clips,
         targetWidth: 160,
         targetHeight: 90,
@@ -306,11 +355,12 @@ test("preview and encoded crossfades preserve brightness throughout the overlap"
         fitMode: "cover",
         opacityAt,
         applyCanvasFilter: new Function(filter)(),
-        getBlob: async (url) => (await fetch(url)).blob(),
+        getBlob: async (sourceId) => clipBlobs.get(sourceId),
         addLog: () => {},
         segmentProgress: { current: [0, 0] },
         setExportProgress: () => {},
       };
+      Object.assign(scope, timeline);
       const fn = new Function(...Object.keys(scope), render)(
         ...Object.values(scope),
       );
@@ -324,7 +374,7 @@ test("preview and encoded crossfades preserve brightness throughout the overlap"
         const canvas = new OffscreenCanvas(160, 90),
           ctx = canvas.getContext("2d"),
           pixels = [];
-        for (const time of [0.25, 0.75, 1.25]) {
+        for (const time of [0.25, 0.5, 0.75, 1, 1.25]) {
           const sample = await sink.getSample(time);
           sample.draw(ctx, 0, 0, 160, 90);
           sample.close();
@@ -333,22 +383,25 @@ test("preview and encoded crossfades preserve brightness throughout the overlap"
         return pixels;
       } finally {
         input.dispose();
-        clips.forEach((c) => URL.revokeObjectURL(c.blobUrl));
       }
     },
     {
       clips,
-      render: expression("App.tsx", "renderSegment"),
-      filter: expression("App.tsx", "applyCanvasFilter"),
+      render: expression("services/renderSegment.ts", "renderSegment"),
+      filter: expression("services/renderSegment.ts", "applyCanvasFilter"),
     },
   );
-  expect(pixels[0][0]).toBeGreaterThan(240);
-  expect(pixels[0][2]).toBeLessThan(10);
-  expect(pixels[2][2]).toBeGreaterThan(240);
-  expect(pixels[2][0]).toBeLessThan(10);
+  for (const pixel of [pixels[0], pixels[1]]) {
+    expect(pixel[0]).toBeGreaterThan(240);
+    expect(pixel[2]).toBeLessThan(10);
+  }
+  for (const pixel of [pixels[3], pixels[4]]) {
+    expect(pixel[2]).toBeGreaterThan(240);
+    expect(pixel[0]).toBeLessThan(10);
+  }
   for (const channel of [0, 2])
-    expect(Math.abs(pixels[1][channel] - preview[channel])).toBeLessThan(20);
-  expect(pixels[1][0] + pixels[1][2]).toBeGreaterThan(240);
+    expect(Math.abs(pixels[2][channel] - preview[channel])).toBeLessThan(20);
+  expect(pixels[2][0] + pixels[2][2]).toBeGreaterThan(240);
 });
 
 test("trimmed buffers exclude both boundaries and standalone tracks end at their duration", async ({
@@ -383,6 +436,7 @@ test("trimmed buffers exclude both boundaries and standalone tracks end at their
       }
       const scope = {
         ...media,
+        settings: {},
         Input,
         AudioBufferSink: Sink,
         mediaAssets: [
@@ -392,15 +446,21 @@ test("trimmed buffers exclude both boundaries and standalone tracks end at their
             muted: false,
             name: "trim",
             trimStart: 0.2,
+            trimEnd: 0.5,
+            originalDuration: 1,
             duration: 0.3,
             startTime: 0.4,
           },
         ],
         audioTracks: [],
         totalDuration: 1,
-        getBlob: async () => new Blob(["fixture"]),
+        getBlob: async () => new Blob([new Function(wav)()(buffer)]),
         audioBufferToWav: new Function(wav)(),
       };
+      Object.assign(scope, window.testRuntime.timeline);
+      Object.assign(scope, window.testRuntime.audio);
+      Object.assign(scope, window.testRuntime.lifecycle);
+      Object.assign(scope, window.testRuntime.mixing);
       const invoke = () =>
         new Function(...Object.keys(scope), mix)(...Object.values(scope))();
       const decode = async (bytes) =>
@@ -414,6 +474,8 @@ test("trimmed buffers exclude both boundaries and standalone tracks end at their
         pcm.slice(a * 44100, b * 44100).reduce((s, x) => s + Math.abs(x), 0) /
         Math.round((b - a) * 44100);
       scope.mediaAssets = [];
+      scope.Input = media.Input;
+      scope.AudioBufferSink = media.AudioBufferSink;
       scope.audioTracks = [{ name: "tone", startTime: 0.2, duration: 0.35 }];
       scope.getBlob = async () =>
         new Blob([Uint8Array.from(atob(tone), (c) => c.charCodeAt(0))]);
@@ -427,8 +489,8 @@ test("trimmed buffers exclude both boundaries and standalone tracks end at their
       };
     },
     {
-      mix: expression("App.tsx", "mixAudio"),
-      wav: expression("App.tsx", "audioBufferToWav"),
+      mix: expression("services/exportPipeline.ts", "mixAudio"),
+      wav: expression("services/exportPipeline.ts", "audioBufferToWav"),
       tone,
     },
   );

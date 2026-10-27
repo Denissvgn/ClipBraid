@@ -17,16 +17,14 @@ test("fixture inventory byte identities are pinned", () => {
   }
 });
 test("timeline bounds overlaps and keeps repeated-source clip edits independent", () => {
-  const clampTransition = evaluate("App.tsx", "clampTransition");
-  const recalculate = evaluate("App.tsx", "recalculateMediaStartTimes", {
-    transitionDuration: 0.5,
-    clampTransition,
-  });
+  const { recalculateMediaStartTimes: recalculate } = loadModule(
+    "services/timeline.ts",
+  );
   const input = [
     { id: "a", mediaId: "shared", duration: 1 },
     { id: "b", mediaId: "shared", duration: 0.2 },
   ];
-  const out = recalculate(input);
+  const out = recalculate(input, 0.5);
   assert.equal(out[0].startTime, 0);
   assert.equal(out[1].startTime, 0.9);
   assert.equal(out[1].transitionDuration, 0.1);
@@ -53,7 +51,7 @@ test("preview/export transition weights change only during the actual overlap", 
     [5.5, [0.5, 0.5]],
     [6, [0, 1]],
   ]) {
-    const opacity = evaluate("App.tsx", "opacityAt", {
+    const opacity = evaluate("services/renderSegment.ts", "opacityAt", {
       createOpacitySampler,
       mediaAssets,
     });
