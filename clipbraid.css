@@ -117,7 +117,10 @@ button[aria-busy="true"] {
 }
 .creation-actions {
   margin-left: auto;
+  max-width: 100%;
+  flex-wrap: wrap;
 }
+.creation-actions .button { min-width: 0; white-space: normal; }
 .button {
   display: inline-flex;
   align-items: center;
@@ -409,11 +412,19 @@ button[aria-busy="true"] {
 }
 .inspector-section {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: var(--space-md);
   padding-bottom: var(--space-xl);
   border-bottom: var(--rule-width) solid var(--color-rule);
 }
 .inspector-section .button { white-space: normal; min-width: 0; }
+.inspector-section .text-button {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .inspector-section label,
 .recorder label {
   display: flex;
@@ -498,9 +509,12 @@ button[aria-busy="true"] {
   cursor: pointer;
   font-size: var(--text-sm);
   min-height: 40px;
+  white-space: normal;
 }
 .recorder[open] {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: var(--space-lg);
 }
 .recorder input {
@@ -859,6 +873,8 @@ input[type="range"]::-moz-range-thumb {
   margin: 0 auto auto;
   width: min(100%, 460px);
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   justify-items: center;
   gap: var(--space-lg);
   text-align: center;
@@ -894,6 +910,7 @@ input[type="range"]::-moz-range-thumb {
 .technical-details summary {
   padding: var(--space-md);
   cursor: pointer;
+  white-space: normal;
 }
 .feedback-actions {
   display: flex;

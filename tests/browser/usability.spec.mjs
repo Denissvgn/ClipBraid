@@ -6,9 +6,9 @@ test("phone and landscape controls reflow with larger text and unavailable fonts
   await page.route("**/*.woff2", route => route.abort());
   await openEditor(page);
   await loadDraft(page, draft([await asset("bars-fractional-av.mp4")]));
-  for (const [width, height] of [[360, 800], [390, 844], [844, 390]]) {
+  for (const font of ["system-ui", "monospace"]) for (const [width, height] of [[360, 800], [390, 844], [844, 390]]) {
     await page.setViewportSize({ width, height });
-    await page.evaluate(() => document.documentElement.style.fontSize = "32px");
+    await page.evaluate(font => { document.documentElement.style.fontSize = "32px"; document.documentElement.style.setProperty("--font-body", font); document.documentElement.style.setProperty("--font-display", font); }, font);
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     const overflow = await page.locator(".app-header button, .editor-inspector button, .playback-toolbar button, .preview-heading button").evaluateAll(buttons => buttons.filter(button => {
       const box = button.getBoundingClientRect();
@@ -28,7 +28,7 @@ test("phone and landscape controls reflow with larger text and unavailable fonts
     await page.getByRole("button", { name: "Start recording", exact: true }).scrollIntoViewIfNeeded();
     await expect(page.getByRole("button", { name: "Start recording", exact: true })).toBeInViewport();
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await info.attach(`reflow-${width}`, { body: await page.screenshot({ fullPage: true }), contentType: "image/png" });
+    await info.attach(`reflow-${font}-${width}`, { body: await page.screenshot({ fullPage: true }), contentType: "image/png" });
   }
 });
 
