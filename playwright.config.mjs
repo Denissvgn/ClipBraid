@@ -4,7 +4,7 @@ const specs=readdirSync(new URL('./tests/browser',import.meta.url)).filter(file=
 export default defineConfig({
   testDir: './tests/browser',
   timeout: 60_000,
-  globalTimeout: 900_000,
+  globalTimeout: 1_080_000,
   expect: { timeout: 10_000 },
   workers: 1,
   // Give each spec its own worker/browser. Context isolation alone does not

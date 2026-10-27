@@ -40,5 +40,7 @@ export async function loadDraft(page, draft) {
     mimeType: "application/json",
     buffer: Buffer.from(JSON.stringify(draft)),
   });
+  const replace=page.getByRole('button',{name:'Open without saving',exact:true});
+  if(await replace.isVisible())await replace.click();
   await expect(page.locator('[data-editor-status="READY"]')).toBeVisible();
 }

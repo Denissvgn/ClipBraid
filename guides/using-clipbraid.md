@@ -37,7 +37,17 @@ An audio track extending past the last visual produces a black video tail.
 
 After saving a project, check that the JSON reached your downloads or host file
 location. Open it once to confirm the backup. An MP4 cannot restore the timeline.
-ClipBraid has no undo/redo yet; save a separate project before a large edit.
+**Undo** and **Redo** restore project edits during this session. Ctrl/Cmd+Z undoes;
+Ctrl/Cmd+Shift+Z or Ctrl+Y redoes. Slider drags form one edit. History keeps up to
+50 edits and 256 MiB of originals retained outside the current project; older
+history can be removed at those limits. Save a separate project before a large edit.
+Opening or restoring a project starts a new history session; history itself does
+not survive reload. The current restored edits can be saved locally again.
+
+The status bar distinguishes unsaved project-file edits, local autosave and whether
+the current edits have been exported. Autosave does not create a downloaded backup.
+Opening another project with unsaved edits offers a backup first, explicit opening
+without that backup, or cancellation. A failed backup keeps the current project open.
 
 Choose **Draft**, **Standard** or **High** in the project settings and review
 **Export profile details**. Draft is smaller 480p output; Standard is 720p; High

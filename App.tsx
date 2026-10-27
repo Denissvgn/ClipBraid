@@ -19,11 +19,13 @@ import {
 } from "./services/project";
 import { MediaSourceStore, type SourceLease } from "./services/mediaSources";
 import { ProjectWork, type ProjectWorkUnit } from "./services/projectWork";
+import { EditHistory, type ProjectContent } from "./services/editHistory";
 import { ExportJobs } from "./services/exportJob";
 import { runExportPipeline } from "./services/exportPipeline";
 import { ProxyQueue } from "./services/proxyQueue";
 import { renderProxy } from "./services/proxyRenderer";
 import { useProjectRecovery } from "./components/useProjectRecovery";
+import { ProjectOpenPrompt } from "./components/ProjectOpenPrompt";
 import type { RecoveryData } from "./services/recovery";
 import { mixPolicy, trackGain } from "./services/mixing";
 import { BUILD_ID } from "./services/buildIdentity";
@@ -179,9 +181,14 @@ const blobToBase64 = (blob: Blob): Promise<string> => {
   });
 };
 export default function App() {
+  const storeRef = useRef<MediaSourceStore | null>(null);
+  if (!storeRef.current) storeRef.current = new MediaSourceStore();
+  const historyRef = useRef<EditHistory | null>(null);
+  if (!historyRef.current) historyRef.current = new EditHistory(storeRef.current);
+  const editHistory = historyRef.current;
+  const historyState = useSyncExternalStore(editHistory.subscribe, editHistory.getSnapshot);
+  const { mediaAssets, audioTracks, aspectRatio, fitMode, transitionDuration } = historyState.project;
   const [showIntro, setShowIntro] = useState(true);
-  const [mediaAssets, setMediaAssets] = useState<MediaAsset[]>([]);
-  const [audioTracks, setAudioTracks] = useState<AudioFragment[]>([]);
   const [projectFilename, setProjectFilename] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [seekRevision, setSeekRevision] = useState(0);
@@ -202,11 +209,6 @@ export default function App() {
   const [mediaNotice, setMediaNotice] = useState<{ category: string; message: string; deliveryMayHaveStarted?: boolean } | null>(null);
   const mediaFailure = (error: unknown) => { const value = platformFailure(error); setMediaNotice({ category: value.category, message: value.message, deliveryMayHaveStarted: value.deliveryMayHaveStarted }); return value; };
 
-  const [transitionDuration, setTransitionDuration] = useState(0.5);
-  const [aspectRatio, setAspectRatio] = useState<"16:9" | "9:16" | "1:1">(
-    "16:9",
-  );
-  const [fitMode, setFitMode] = useState<"contain" | "cover">("contain");
   const [showSafeZones, setShowSafeZones] = useState(false);
   const [isTheaterMode, setIsTheaterMode] = useState(false);
   const [showJournal, setShowJournal] = useState(false);
@@ -241,6 +243,30 @@ export default function App() {
     opener?.focus();
   };
 
+  const editProject = useCallback((label: string, change: (project: ProjectContent) => ProjectContent) => {
+    const changed = editHistory.update(label, change);
+    if (changed) setIsPlaying(false);
+    return changed;
+  }, [editHistory]);
+  const setMediaAssets = useCallback((update: React.SetStateAction<MediaAsset[]>, label = "Edit clips") =>
+    editProject(label, project => ({ ...project, mediaAssets: typeof update === "function" ? update(project.mediaAssets) : update })), [editProject]);
+  const setAudioTracks = useCallback((update: React.SetStateAction<AudioFragment[]>, label = "Edit audio") =>
+    editProject(label, project => ({ ...project, audioTracks: typeof update === "function" ? update(project.audioTracks) : update })), [editProject]);
+  const setAspectRatio = useCallback((value: ProjectContent["aspectRatio"]) => editProject("Change aspect ratio", project => ({ ...project, aspectRatio: value })), [editProject]);
+  const setFitMode = useCallback((value: ProjectContent["fitMode"]) => editProject("Change framing", project => ({ ...project, fitMode: value })), [editProject]);
+  const setTransitionDuration = useCallback((value: number) => editProject("Change crossfades", project => ({ ...project, transitionDuration: value,
+    mediaAssets: sequenceMediaStartTimes(project.mediaAssets, value) })), [editProject]);
+  const beginEditGesture = (event: React.SyntheticEvent) => {
+    if (event.target instanceof HTMLInputElement && event.target.type === "range") editHistory.beginGroup(event.type === "pointerdown");
+  };
+  const endEditGesture = (event: React.SyntheticEvent) => {
+    if(event.type === "blur" && !(event.target instanceof HTMLInputElement && event.target.type === "range"))return;
+    editHistory.endGroup();
+  };
+  const [pendingProject, setPendingProjectState] = useState<File | null>(null);
+  const pendingProjectRef = useRef<File | null>(null);
+  const setPendingProject = (file: File | null) => { pendingProjectRef.current=file;setPendingProjectState(file); };
+
   const cleanupRef = useRef<{
     mediaAssets: MediaAsset[];
     audioTracks: AudioFragment[];
@@ -251,8 +277,6 @@ export default function App() {
 
   // Media ownership: immutable originals and every object URL live in this
   // store; state holds clip instances that reference sources by ID.
-  const storeRef = useRef<MediaSourceStore | null>(null);
-  if (!storeRef.current) storeRef.current = new MediaSourceStore();
   const projectWorkRef = useRef<ProjectWork | null>(null);
   if (!projectWorkRef.current) projectWorkRef.current = new ProjectWork(storeRef.current);
   const projectWork = projectWorkRef.current;
@@ -331,6 +355,7 @@ export default function App() {
       exportJobs.dispose();
       recordingEpoch.current++; recordingRef.current?.cancel.abort();
       proxyQueue.dispose();
+      editHistory.dispose();
       storeRef.current!.clear();
     };
   }, []);
@@ -684,12 +709,33 @@ export default function App() {
     if (track) logEvent("info", `Audio track removed: ${track.name}`);
     setAudioTracks((prev) => prev.filter((t) => t.id !== id));
   }, []);
+  const travelHistory = useCallback((direction: "undo" | "redo") => {
+    if (exportJobs.getSnapshot().active || isRecording || !editHistory.getSnapshot()[direction === "undo" ? "canUndo" : "canRedo"]) return;
+    projectWork.invalidate();setIsPlaying(false);editHistory[direction]();setSeekRevision(value=>value+1);
+    const next=editHistory.getSnapshot().project;
+    setCurrentTime(time=>clampPlayhead(time,projectDuration(next.mediaAssets,next.audioTracks)));
+    setSelectedAssetId(id=>next.mediaAssets.some(asset=>asset.id===id)?id:null);
+  }, [editHistory,exportJobs,isRecording,projectWork]);
+  useEffect(() => {
+    const warn=(event:BeforeUnloadEvent)=>{if(editHistory.getSnapshot().dirty && recoveryStateRef.current.status!=="saved"){event.preventDefault();event.returnValue=""}};
+    window.addEventListener("beforeunload",warn);return()=>window.removeEventListener("beforeunload",warn);
+  }, [editHistory]);
+  useEffect(() => {
+    const key=(event:KeyboardEvent)=>{
+      if(!(event.ctrlKey||event.metaKey)||event.altKey||showIntro||showJournal||pendingProject)return;
+      const target=event.target as HTMLElement|null;
+      if(target?.isContentEditable||target?.closest('textarea, input:not([type="range"])'))return;
+      const undo=event.key.toLowerCase()==="z"&&!event.shiftKey,redo=(event.key.toLowerCase()==="z"&&event.shiftKey)||event.key.toLowerCase()==="y";
+      if(undo||redo){event.preventDefault();travelHistory(undo?"undo":"redo")}
+    };
+    window.addEventListener("keydown",key);return()=>window.removeEventListener("keydown",key);
+  },[travelHistory,showIntro,showJournal,pendingProject]);
   // Keyboard shortcuts: Space = play/pause, arrows = seek (Shift = 5s),
   // Delete/Backspace = remove selected clip. Ignored while typing or exporting.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.ctrlKey || e.altKey || e.metaKey) return;
-      if (isExporting || isRecording || showIntro || showJournal) return;
+      if (isExporting || isRecording || showIntro || showJournal || pendingProject) return;
       const target = e.target as HTMLElement | null;
       if (
         target &&
@@ -721,6 +767,7 @@ export default function App() {
     isRecording,
     showIntro,
     showJournal,
+    pendingProject,
     currentTime,
     selectedAssetId,
     togglePlayback,
@@ -735,6 +782,7 @@ export default function App() {
     // One consistent snapshot of a single render's state. Every source is
     // leased before the first await, so replacing or deleting the project
     // mid-save retires pins but cannot purge the bytes this save is reading.
+    const savedGeneration = editHistory.generation;
     const snapshot = {
       projectFilename,
       mediaAssets,
@@ -767,15 +815,18 @@ export default function App() {
         filename: snapshot.projectFilename || defaultProjectFilename(),
       });
       if (!accepted) throw new Error("Project download was not acknowledged.");
+      editHistory.markSaved({ mediaAssets: snapshot.mediaAssets, audioTracks: snapshot.audioTracks, aspectRatio: snapshot.aspectRatio, fitMode: snapshot.fitMode, transitionDuration: snapshot.transitionDuration }, savedGeneration);
       sysLog(
         "save",
         `Project file handed to download adapter: ${snapshot.mediaAssets.length} clips, ${snapshot.audioTracks.length} audio tracks (${(base64.length / 1048576).toFixed(1)} MiB)`,
       );
       setStatus("READY");
+      return true;
     } catch (err) {
       const error = mediaFailure(err);
       setStatus(error.category === "cancelled" ? "SAVE CANCELLED" : "SAVE ERROR");
       sysLog("error", `Project save failed: ${String(err).slice(0, 120)}`);
+      return false;
     } finally {
       for (const lease of leases) lease.release();
       saveInFlightRef.current = false;
@@ -836,11 +887,9 @@ export default function App() {
       recordingEpoch.current++; recordingRef.current?.cancel.abort();
       setIsPlaying(false);
       setSelectedAssetId(null);
-      setMediaAssets(restoredMedia);
-      setAudioTracks(restoredAudio);
-      setAspectRatio(data.aspectRatio);
-      setFitMode(data.fitMode);
-      setTransitionDuration(data.transitionDuration);
+      setPendingProject(null);
+      editHistory.reset({ mediaAssets: restoredMedia, audioTracks: restoredAudio,
+        aspectRatio: data.aspectRatio, fitMode: data.fitMode, transitionDuration: data.transitionDuration }, !options.ui);
       setCurrentTime(restoredTime);
       setProjectFilename(options.filename ?? null);
       if (options.ui) {
@@ -898,7 +947,12 @@ export default function App() {
   }
   const handleLoadProject = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = "";
     if (!file) return;
+    if (editHistory.getSnapshot().dirty) { setPendingProject(file); return; }
+    await openProjectFile(file);
+  };
+  const openProjectFile = async (file: File) => {
     const work = projectWork.beginLoad();
     setMediaNotice(null); setStatus("LOADING PROJECT...");
     // Gate on the real byte size before reading, parsing or allocating anything.
@@ -915,7 +969,6 @@ export default function App() {
       setMediaNotice({ category: "project", message: "Could not read this project file. Your current project is still available." });
       sysLog("error", `Project load failed: ${String(err).slice(0, 120)}`);
     } finally {
-      if (work.isCurrent()) e.target.value = "";
       work.finish();
     }
   };
@@ -992,6 +1045,9 @@ export default function App() {
   }, []);
   const updateSelectedAsset = (updates: Partial<MediaAsset>) => {
     if (!selectedAssetId) return;
+    const label = updates.trimStart !== undefined || updates.trimEnd !== undefined ? "Trim clip"
+      : updates.filter !== undefined ? "Change look" : updates.gain !== undefined ? "Change clip volume"
+      : updates.transitionDuration !== undefined ? "Change crossfade" : "Edit clip";
     setMediaAssets((prev) => {
       const index = prev.findIndex((m) => m.id === selectedAssetId);
       if (index === -1) return prev;
@@ -1005,7 +1061,7 @@ export default function App() {
 
       newAssets[index] = merged;
       return recalculateMediaStartTimes(newAssets);
-    });
+    }, label);
   };
   const selectedAsset = useMemo(
     () => mediaAssets.find((m) => m.id === selectedAssetId),
@@ -1017,8 +1073,13 @@ export default function App() {
     if (!mediaAssets.length || exportJobs.getSnapshot().active || !exportJobs.getSnapshot().cleanupComplete) return;
     setIsPlaying(false);
     setStatus("EXPORTING...");
-    void exportJobs.start({ mediaAssets, audioTracks, aspectRatio, fitMode,
+    const exportedProject = editHistory.getSnapshot().project, exportedGeneration = editHistory.generation;
+    const completion = exportJobs.start({ mediaAssets, audioTracks, aspectRatio, fitMode,
       exportQuality, totalDuration, segmentPreference: singleEncoder ? 1 : 2 });
+    const jobId = exportJobs.getSnapshot().jobId;
+    void completion.then(() => { const state = exportJobs.getSnapshot();
+      if (state.jobId === jobId && state.phase === "complete" && state.result) editHistory.markExported(exportedProject, exportedGeneration);
+    });
   };
   const videos = mediaAssets.filter((asset) => asset.type === "video");
   const allVideoMuted =
@@ -1049,7 +1110,10 @@ export default function App() {
       : status === "BOOTING..." ? "Starting editor…"
       : status.charAt(0) + status.slice(1).toLowerCase();
   return (
-    <div className={`editor-app ${isTheaterMode ? "theater-mode" : ""}`} data-build-id={BUILD_ID}>
+    <div className={`editor-app ${isTheaterMode ? "theater-mode" : ""}`} data-build-id={BUILD_ID}
+      onPointerDownCapture={beginEditGesture} onPointerUpCapture={endEditGesture} onPointerCancelCapture={endEditGesture}
+      onFocusCapture={beginEditGesture} onBlurCapture={endEditGesture}
+      onKeyDownCapture={event => { if (["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","Home","End"].includes(event.key)) beginEditGesture(event); }} onKeyUpCapture={endEditGesture}>
       <output hidden id="export-evidence" aria-hidden="true">{JSON.stringify(exportState)}</output>
       <output hidden id="export-diagnostic-report" aria-hidden="true">{JSON.stringify(createJobReport(exportState))}</output>
       {showIntro && <IntroModal onDismiss={() => setShowIntro(false)} />}
@@ -1061,6 +1125,10 @@ export default function App() {
           onClose={() => setShowJournal(false)}
         />
       )}
+      {pendingProject && <ProjectOpenPrompt filename={pendingProject.name}
+        onCancel={() => setPendingProject(null)}
+        onOpen={() => { const file=pendingProject; setPendingProject(null); void openProjectFile(file); }}
+        onSave={async () => { const file=pendingProject; if(await handleSaveProject() && pendingProjectRef.current===file){setPendingProject(null);await openProjectFile(file);return true}return false }} />}
       <AudioEngine
         audioTracks={audioTracks}
         mediaAssets={mediaAssets}
@@ -1096,6 +1164,12 @@ export default function App() {
             <span className="brand-descriptor">{BRAND.descriptor}</span>
           </span>
         </button>
+        <div className="project-actions" aria-label="Edit history" title="Undo history is session-local: up to 50 edits and 256 MiB of retained originals. Save a project backup before large changes.">
+          <button className="button secondary" onClick={() => travelHistory("undo")} disabled={!historyState.canUndo || isExporting || isRecording}
+            title={historyState.undoLabel ? `Undo ${historyState.undoLabel}` : "Nothing to undo"}><Icon name="undo" />Undo</button>
+          <button className="button secondary" onClick={() => travelHistory("redo")} disabled={!historyState.canRedo || isExporting || isRecording}
+            title={historyState.redoLabel ? `Redo ${historyState.redoLabel}` : "Nothing to redo"}><Icon name="redo" />Redo</button>
+        </div>
         <div className="project-actions" aria-label="Project actions">
           <button
             className="button quiet"
@@ -1741,6 +1815,11 @@ export default function App() {
           {recovery.status === "saved" ? `Saved locally · revision ${recovery.revision}` :
             recovery.status === "saving" ? "Saving locally…" : recovery.status === "choice" ? "Local recovery available" :
             recovery.status === "unavailable" ? "Local autosave unavailable" : "Unsaved local changes"}
+        </span>
+        <span className="project-backup-status" role="status" data-project-dirty={historyState.dirty}>
+          {historyState.dirty ? "Project file: unsaved edits" : "Project file: no unsaved edits"}
+          {historyState.limited && " · Older undo history removed at its limit"}
+          {historyState.exported ? " · Current edits exported" : " · Export not current"}
         </span>
         <span className="status-hint">
           Audio files start at the playhead. Add several to layer them.

@@ -299,6 +299,17 @@ export class MediaSourceStore {
       }
   }
 
+  /** Restore a document from retained history. Only an existing leased original
+   * can be revived; a purged source can never be recreated by its old ID. */
+  restorePins(sourceIds: Iterable<string>): void {
+    const entries=[...new Set(sourceIds)].map(id=>{
+      const entry=this.entries.get(id);
+      if(!entry||entry.refs<1)throw new Error(`History original is unavailable: ${id}`);
+      return {id,entry};
+    });
+    for(const {id,entry} of entries){entry.disposed=false;this.pin(id)}
+  }
+
   /**
    * Dispose a source (staging rollback or explicit deletion). The pinned
    * reference is dropped; open leases keep the bytes until their release.
