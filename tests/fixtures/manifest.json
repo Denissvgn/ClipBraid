@@ -94,5 +94,9 @@
   "vfr.mp4": {
     "bytes": 2891,
     "sha256": "b3edcec0bf79f5d511509a87d5eca415d253a02d79869dcf315f5404a4164bb0"
+  },
+  "gapless-pulses.mp3": {
+    "bytes": 145196,
+    "sha256": "98d48937add9edd750c26475681a2cabfd8071fc3119b82e3e6099ee9f161dca"
   }
 }

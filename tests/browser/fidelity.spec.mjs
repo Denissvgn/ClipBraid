@@ -3,6 +3,21 @@ import { asset, draft, openProbe } from "./fixtures.mjs";
 import { openEditor, loadDraft } from "./helpers.mjs";
 import { readFile } from "node:fs/promises";
 import { inspectOutput } from "./media-inspection.mjs";
+test("fractional timeline subtraction preserves exact source packet boundaries",async({context},info)=>{
+  const probe=await openProbe(context);
+  const points=await probe.evaluate(async()=>{
+    const {createRenderer}=await import('/services/renderSegment.ts');
+    const blob=await(await fetch('/tests/fixtures/rate-24.mp4')).blob(),points=[];
+    const asset={id:'boundary',sourceId:'source',name:'synthetic 24 fps',type:'video',filter:'none',startTime:22.5,duration:1,originalDuration:1,trimStart:0,trimEnd:0};
+    const render=createRenderer([asset],{targetWidth:854,targetHeight:480,videoBitrate:500000,fps:24,frameDuration:1/24,fitMode:'contain',frameStart:540,frameEnd:564},
+      async()=>blob,()=>{},()=>{},point=>{if(point.operation==='decode-ready')points.push(point)});
+    await render(22.5,23.5,0);return points;
+  });
+  await info.attach('source-boundary-samples',{body:JSON.stringify(points),contentType:'application/json'});
+  expect(points).toHaveLength(24);
+  for(let frame=0;frame<24;frame++)expect(points[frame].sampleTimestamp).toBeCloseTo(frame/24,9);
+  await probe.close();
+});
 test("the final selected frame keeps its valid source timestamp near a trim boundary",async({page},info)=>{
   await openEditor(page);await loadDraft(page,draft([await asset("rate-30.mp4",{id:"near-end",duration:.034,originalDuration:1,trimStart:.0334,trimEnd:.9326,sourceFps:30,hasAudio:false})]));
   await page.getByRole("button",{name:"draft",exact:true}).click();const ready=page.waitForEvent("download");

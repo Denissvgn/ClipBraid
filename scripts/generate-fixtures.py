@@ -1,6 +1,6 @@
 """Generate synthetic fixtures in isolation, then publish their pinned inventory.
 
-Optional regeneration only: Python 3 plus FFmpeg with libx264/AAC, lavfi and
+Optional regeneration only: Python 3 plus FFmpeg with libx264/AAC/libmp3lame, lavfi and
 -display_rotation support. Native FFmpeg is NOT required by npm run check.
 Different FFmpeg/x264 builds may change encoded bytes; review the new manifest
 and run all checks. Existing local extras are never included in the inventory.
@@ -38,6 +38,15 @@ def generate(root):
             if i in (4800, 38400): v=0.8
             samples.append(int(v*32767))
         w.writeframes(struct.pack('<48000h', *samples))
+    # Tagged six-second MP3: native gapless decode is the worker timing oracle.
+    gapless_source = root / '_gapless-source.wav'
+    with wave.open(str(root / 'tone-impulses.wav'), 'rb') as original:
+        params, data = original.getparams(), original.readframes(original.getnframes())
+    with wave.open(str(gapless_source), 'wb') as repeated:
+        repeated.setparams(params)
+        repeated.writeframes(data * 6)
+    ff('-i', str(gapless_source), '-c:a', 'libmp3lame', '-b:a', '192k', '-write_xing', '1', str(root / 'gapless-pulses.mp3'))
+    gapless_source.unlink()
     (root / 'corrupt.mp4').write_bytes(b'not an mp4\x00\xff')
     (root / 'unsupported.bin').write_bytes(b'CLIPBRAID_SYNTHETIC_UNSUPPORTED_FORMAT\x00')
     cases={'invalid-arrays.json':{'mediaAssets':{}},'invalid-json.json':None,'duplicate-ids.json':{'mediaAssets':[{'id':'same'},{'id':'same'}]},'invalid-timings.json':{'mediaAssets':[{'id':'bad','startTime':-1,'duration':1e100}]},'future-version.json':{'schemaVersion':9999,'mediaAssets':[],'audioTracks':[]}}

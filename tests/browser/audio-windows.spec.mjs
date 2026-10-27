@@ -4,6 +4,40 @@ import { expression } from "../source-probes.mjs";
 import { asset, draft, openProbe } from "./fixtures.mjs";
 import { openEditor, loadDraft } from "./helpers.mjs";
 
+test("tagged MP3 priming and batch seeks match native gapless playback",async({context},info)=>{
+  const page=await openProbe(context);
+  const measured=await page.evaluate(async()=>{
+    const {audio,lifecycle}=window.testRuntime;
+    const blob=await(await fetch('/tests/fixtures/gapless-pulses.mp3')).blob();
+    const {recordedDuration}=await import('/services/audioDuration.ts');
+    const recordedSeconds=await recordedDuration(blob)/1000;
+    const rate=48000,expected=await new OfflineAudioContext(1,6*rate,rate).decodeAudioData(await blob.arrayBuffer());
+    const target=expected.getChannelData(0),actual=new Float32Array(target.length),resources=new lifecycle.ExportResources();
+    try{
+      for(let from=0;from<6;from+=2){
+        const context=new OfflineAudioContext(1,2*rate,rate);
+        const decoded=audio.combineAudioChunks(await lifecycle.decodeAudioInWorker(blob,from,from+2,resources));
+        audio.scheduleAudioChunk(context,decoded.buffer,decoded.timestamp,{sourceStart:0,sourceEnd:6,timelineStart:-from,timelineEnd:2});
+        actual.set((await context.startRendering()).getChannelData(0),from*rate);
+      }
+    }finally{await resources.close()}
+    const compare=(start,end)=>{
+      let dot=0,a=0,b=0;
+      for(let i=start;i<end;i++){dot+=target[i]*actual[i];a+=target[i]**2;b+=actual[i]**2}
+      return dot/Math.sqrt(a*b);
+    };
+    const peak=(pcm,start,end)=>{let index=start;for(let i=start+1;i<end;i++)if(Math.abs(pcm[i])>Math.abs(pcm[index]))index=i;return index};
+    return {duration:expected.duration,recordedSeconds,correlation:compare(0,target.length),
+      batchCorrelations:[0,2,4].map(start=>compare(start*rate,(start+2)*rate)),
+      peakOffsets:[0,1,2,3,4,5].map(second=>peak(actual,second*rate,(second+.3)*rate)-peak(target,second*rate,(second+.3)*rate))};
+  });
+  await info.attach('mp3-gapless-alignment',{body:JSON.stringify(measured),contentType:'application/json'});
+  expect(measured.duration).toBe(6);expect(measured.recordedSeconds).toBe(6);expect(measured.correlation).toBeGreaterThan(.995);
+  for(const value of measured.batchCorrelations)expect(value).toBeGreaterThan(.995);
+  for(const value of measured.peakOffsets)expect(Math.abs(value)).toBeLessThanOrEqual(1);
+  await page.close();
+});
+
 test("real decoded PCM excludes impulses on both resampled trim edges", async ({ context }, info) => {
   const page = await openProbe(context);
   const results = await page.evaluate(async ({ tone, mix, wav }) => {

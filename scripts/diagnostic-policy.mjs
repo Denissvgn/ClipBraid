@@ -13,6 +13,7 @@ export function diagnosticOptions(args,environment=process.env,root=process.cwd(
   if(!['draft','standard','high'].includes(quality)||!['auto','single'].includes(plan))throw new Error('Invalid diagnostic quality or encoder plan.');
   const timeoutMs=Number(rawTimeout);
   if(!/^\d+$/.test(rawTimeout)||!Number.isSafeInteger(timeoutMs)||timeoutMs<1000||timeoutMs>1800000)throw new Error('Diagnostic timeout must be 1000–1800000 ms.');
+  if(environment.CLIPBRAID_DIAGNOSTIC_SOFTWARE!==undefined&&!['0','1'].includes(environment.CLIPBRAID_DIAGNOSTIC_SOFTWARE))throw new Error('CLIPBRAID_DIAGNOSTIC_SOFTWARE must be 0 or 1.');
   const baseURL=new URL(environment.CLIPBRAID_DIAGNOSTIC_URL??'http://127.0.0.1:4181/');
   if(!['http:','https:'].includes(baseURL.protocol)||!['localhost','127.0.0.1','[::1]'].includes(baseURL.hostname)||baseURL.username||baseURL.password||baseURL.search||baseURL.hash)
     throw new Error('Diagnostic URL must be a local loopback HTTP(S) server.');
@@ -31,7 +32,7 @@ export function diagnosticOptions(args,environment=process.env,root=process.cwd(
     catch(error){if(error.code!=='ENOENT')throw error}
   }
   for(const name of ['result.json','trace.json','trace.jsonl','output.mp4'])if(existsSync(path.join(output,name)))throw new Error('Diagnostic evidence already exists; choose a new output directory.');
-  return {input:path.resolve(root,input),folder:output,quality,plan,timeoutMs,baseURL:baseURL.href};
+  return {input:path.resolve(root,input),folder:output,quality,plan,timeoutMs,baseURL:baseURL.href,software:environment.CLIPBRAID_DIAGNOSTIC_SOFTWARE==='1'};
 }
 export function diagnosticBuild(root=process.cwd()) {
   const identity=sourceIdentity(root),build=JSON.parse(readFileSync(path.join(root,'reports/build-artifacts.json'),'utf8'));

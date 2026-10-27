@@ -62,7 +62,7 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
   const canvas = new OffscreenCanvas(targetWidth, targetHeight);
   const ctx = canvas.getContext("2d", { alpha: false, colorSpace: "srgb" })!;
   const sinks = new Map<string, VideoSampleSink>();
-  const streams = new Map<string, { input: Input; times: number[]; remaining: number; iterator?: AsyncIterator<VideoSample | null>; closed: boolean }>();
+  const streams = new Map<string, { input: Input; times: number[]; resolution: number; remaining: number; iterator?: AsyncIterator<VideoSample | null>; closed: boolean }>();
   const activeInputs = new Set<Input>();
   const images = new Map<string, ImageBitmap>();
   const inputs: Input[] = [];
@@ -93,10 +93,12 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
           const track = await input.getPrimaryVideoTrack();
           if (!track || !(await track.canDecode()))
             throw new Error("Missing or unsupported video track");
+          const resolution = await track.getTimeResolution();
+          if (!Number.isFinite(resolution) || resolution <= 0) throw new Error("Invalid video time resolution");
           sinks.set(asset.id, new VideoSampleSink(track));
           const times: number[] = [];
-          for (let frame = 0; frame < totalFrames; frame++) if (isIntervalActive(asset, timelineTime(frame))) times.push(sourceTimeAt(asset, timelineTime(frame)));
-          streams.set(asset.id, { input, times, remaining: times.length, closed: false });
+          for (let frame = 0; frame < totalFrames; frame++) if (isIntervalActive(asset, timelineTime(frame))) times.push(sourceTimeAt(asset, timelineTime(frame), resolution));
+          streams.set(asset.id, { input, times, resolution, remaining: times.length, closed: false });
         }
       } catch (error) {
         if (signal?.aborted) throw signal.reason;
@@ -116,7 +118,7 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
         const sink = sinks.get(asset.id);
         const stream = streams.get(asset.id);
         if (!sink || !stream) throw new Error(`Missing decoder for ${asset.name}`);
-        const local = sourceTimeAt(asset, t);
+        const local = sourceTimeAt(asset, t, stream.resolution);
         trace("decode-request", { clipId: asset.id, sourceTime: local, timelineTime: t, frame: i, liveSamples: decoded.size });
             if (i === 0) addLog("Decoding visual media");
         // This iterator owns one decoder for the clip's monotonic frame grid.
@@ -130,7 +132,7 @@ export function createRenderer(mediaAssets: MediaAsset[], settings: RenderSettin
         }
         const sample = next.value;
         stream.remaining--;
-        trace("decode-ready", { clipId: asset.id, sourceTime: local, timelineTime: t, frame: i });
+        trace("decode-ready", { clipId: asset.id, sourceTime: local, timelineTime: t, frame: i, sampleTimestamp: sample?.timestamp });
         if (!sample)
           throw Object.assign(new Error(`No decoded frame for ${asset.name} at ${local.toFixed(3)}s`), { category: "asset", assetId: asset.id });
         decoded.set(asset.id, sample);

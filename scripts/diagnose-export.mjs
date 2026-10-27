@@ -32,8 +32,13 @@ async function summary(stopped=false){
   await writeFile(temporary,JSON.stringify(report,null,2));await rename(temporary,'reports/diagnostics/latest.json');
 }
 try{
-  browser=await chromium.launch({channel:'chromium',headless:true,args:['--autoplay-policy=no-user-gesture-required']});
+  const launchArgs=['--autoplay-policy=no-user-gesture-required',...(options.software?['--disable-gpu','--disable-accelerated-video-encode','--disable-accelerated-video-decode']:[])];
+  result.environment.launchArgs=launchArgs;
+  if(options.software)result.environment.acceleration='GPU and accelerated video encode/decode disabled by Chromium launch flags; hardware unqualified';
+  browser=await chromium.launch({channel:'chromium',headless:true,args:launchArgs});
   result.environment.browser=browser.version();page=await browser.newPage();
+  const session=await page.context().newCDPSession(page);
+  await session.send('Performance.enable');
   page.on('pageerror',error=>result.errors.push(String(error)));
   const expected=new Map(evidence.build.files.map(file=>[new URL(file.path,options.baseURL).href,file]));
   const indexArtifact=evidence.build.files.find(file=>file.path==='index.html'),origin=new URL(options.baseURL).origin;
@@ -77,7 +82,9 @@ try{
   const started=Date.now();
   while(Date.now()-started<options.timeoutMs){
     await page.waitForTimeout(1000);result.state=await page.locator('#export-evidence').evaluate(element=>JSON.parse(element.textContent));
-    await summary();const point={wallMs:Date.now()-started,...result.state};trace.push(point);
+    await summary();const metrics=await session.send('Performance.getMetrics');
+    const heap=metrics.metrics.find(metric=>metric.name==='JSHeapUsedSize')?.value;
+    const point={wallMs:Date.now()-started,...result.state,resources:{pageJsHeapBytes:Number.isFinite(heap)?heap:null}};trace.push(point);
     await appendFile(`${options.folder}/trace.jsonl`,JSON.stringify(point)+'\n');
     if(!result.state.active)break;
   }

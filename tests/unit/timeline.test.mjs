@@ -24,6 +24,19 @@ const {
 const closeTo = (actual, expected) =>
   assert.ok(Math.abs(actual - expected) < 1e-9, `${actual} != ${expected}`);
 
+test("video packet grid repairs cancellation noise without shifting fractional trims or interval ends",()=>{
+  const clip={startTime:22.5,originalDuration:1,trimStart:0,trimEnd:0};
+  const raw=sourceTimeAt(clip,551/24);
+  assert(raw<11/24);
+  assert.equal(sourceTimeAt(clip,551/24,12288),11/24);
+  const trimmed={...clip,trimStart:.0334,trimEnd:.9326};
+  assert.equal(sourceTimeAt(trimmed,22.5+1/30,15360),sourceTimeAt(trimmed,22.5+1/30));
+  const justBeforeEnd={...clip,trimEnd:1-11/24};
+  const selected=sourceTimeAt(justBeforeEnd,551/24,12288);
+  assert(selected<11/24);
+  assert.equal(sourceTimeAt(clip,551/24,NaN),raw);
+});
+
 test("timeline intervals are half-open and standalone audio defines the tail", () => {
   const first = { id: "first", startTime: 1, duration: 2 };
   const second = { id: "second", startTime: 3, duration: 1 };

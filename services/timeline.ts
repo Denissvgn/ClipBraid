@@ -121,16 +121,26 @@ export function sourceTimeAt(
     "startTime" | "trimStart" | "trimEnd" | "originalDuration"
   >,
   time: number,
+  timeResolution?: number,
 ): number {
   const window = sourceWindow(asset);
   const last = Math.max(window.start, window.end - 1e-3);
   const selected = time - asset.startTime + window.start;
-  return Math.max(
+  const result = Math.max(
     window.start,
     // Keep valid in-range queries exact. The conservative last-frame guard
     // is only for requests at/beyond the source end, never a trim adjustment.
     selected < window.end ? selected : last,
   );
+  if (timeResolution !== undefined && Number.isFinite(timeResolution) && timeResolution > 0) {
+    // Subtracting timeline offsets can put an exact packet boundary a few
+    // floating-point ulps early. Snap only that arithmetic noise to the native
+    // time grid; genuine fractional trims and half-open source bounds stay exact.
+    const snapped = Math.round(result * timeResolution) / timeResolution;
+    const tolerance = 8 * Number.EPSILON * Math.max(1, Math.abs(time), Math.abs(asset.startTime), Math.abs(result));
+    if (Math.abs(result - snapped) <= tolerance && snapped >= window.start && snapped < window.end) return snapped;
+  }
+  return result;
 }
 
 export function canvasFit(
