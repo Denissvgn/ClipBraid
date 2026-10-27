@@ -10,9 +10,10 @@ export async function evidencePath(file,root=process.cwd()) {
   if(!relative.startsWith('reports/')||relative.includes('/../'))throw new Error('Qualification records and artifacts must stay in ignored reports/.');
   return safeFilePath(absolute,root);
 }
-export async function readEvidence(file,root=process.cwd()) {
+export async function readEvidence(file,root=process.cwd(),maxBytes=4*1048576) {
+  if(!Number.isSafeInteger(maxBytes)||maxBytes<1||maxBytes>64*1048576)throw new Error('Invalid qualification read limit.');
   const absolute=await evidencePath(file,root),info=await lstat(absolute);
-  if(!info.isFile()||info.size>4*1048576)throw new Error('Qualification record must be a regular JSON file of at most 4 MiB.');
+  if(!info.isFile()||info.size>maxBytes)throw new Error(`Qualification record must be a regular JSON file of at most ${maxBytes} bytes.`);
   return JSON.parse(await readFile(absolute,'utf8'));
 }
 export async function verifyEvidenceArtifacts(items,root=process.cwd()) {
