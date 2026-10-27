@@ -98,5 +98,9 @@
   "gapless-pulses.mp3": {
     "bytes": 145196,
     "sha256": "98d48937add9edd750c26475681a2cabfd8071fc3119b82e3e6099ee9f161dca"
+  },
+  "sync-markers.mp4": {
+    "bytes": 9252,
+    "sha256": "5c17385d7c24d5db7dd0f8c6a946fc4c3605b4d34e4c4f015e0f75c056216ff2"
   }
 }

@@ -92,3 +92,29 @@ test("profile frame counts, rational rates and framing survive real encoding", a
   await probe.close();
   await info.attach("fidelity-matrix", { body: JSON.stringify(evidence), contentType: "application/json" });
 });
+
+
+test("physical sync fixture has two aligned flash and beep markers",async({context},info)=>{
+  const page=await openProbe(context);
+  const measured=await page.evaluate(async()=>{
+    const {media}=window.testRuntime;
+    const blob=await(await fetch('/tests/fixtures/sync-markers.mp4')).blob();
+    const input=new media.Input({source:new media.BlobSource(blob),formats:media.ALL_FORMATS});
+    const flashes=[];let frames=0;
+    try{
+      const canvas=new OffscreenCanvas(1,1),ctx=canvas.getContext('2d');
+      for await(const sample of new media.VideoSampleSink(await input.getPrimaryVideoTrack()).samples()){
+        try{sample.draw(ctx,0,0,1,1);if(ctx.getImageData(0,0,1,1).data[0]>230)flashes.push(sample.timestamp);frames++}finally{sample.close()}
+      }
+    }finally{input.dispose()}
+    const audio=await new OfflineAudioContext(1,144000,48000).decodeAudioData(await blob.arrayBuffer()),pcm=audio.getChannelData(0);
+    const rms=(from,to)=>{const values=pcm.subarray(Math.round(from*audio.sampleRate),Math.round(to*audio.sampleRate));return Math.sqrt(values.reduce((sum,x)=>sum+x*x,0)/values.length)};
+    return {frames,flashes,audioDuration:audio.duration,quiet:[rms(.5,.6),rms(1.1,1.2),rms(2.1,2.2)],beeps:[rms(1.005,1.015),rms(2.005,2.015)]};
+  });
+  await info.attach('physical-sync-input',{body:JSON.stringify(measured),contentType:'application/json'});
+  expect(measured.frames).toBe(90);expect(measured.flashes).toEqual([1,2]);
+  expect(measured.audioDuration).toBeGreaterThanOrEqual(3);expect(measured.audioDuration).toBeLessThan(3.03);
+  for(const value of measured.quiet)expect(value).toBeLessThan(.001);
+  for(const value of measured.beeps)expect(value).toBeGreaterThan(.2);
+  await page.close();
+});

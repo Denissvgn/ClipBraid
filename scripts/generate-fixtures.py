@@ -29,6 +29,8 @@ def generate(root):
     ff('-f', 'lavfi', '-i', 'color=c=red:s=1600x900:r=30:d=0.5', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=0.5', '-c:v', 'libx264', '-threads', '1', '-preset', 'ultrafast', '-crf', '25', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k', '-shortest', '-movflags', '+faststart', str(root / 'oversized-av.mp4'))
     ff('-f', 'lavfi', '-i', 'smptebars=size=160x90:rate=30000/1001:duration=1.001', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=1.001', '-c:v', 'libx264', '-threads', '1', '-preset', 'ultrafast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k', '-shortest', '-movflags', '+faststart', str(root / 'bars-fractional-av.mp4'))
     ff('-display_rotation:v:0', '270', '-i', str(root / 'bars-fractional-av.mp4'), '-c', 'copy', str(root / 'rotated-av.mp4'))
+    # Two one-frame flashes with matching beeps support physical A/V timing measurements.
+    ff('-f', 'lavfi', '-i', 'color=c=black:s=320x180:r=30:d=3', '-f', 'lavfi', '-i', 'aevalsrc=0.5*sin(2*PI*1000*t)*(between(t\\,1\\,1.02)+between(t\\,2\\,2.02)):s=48000:d=3', '-vf', "drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:enable='eq(n,30)+eq(n,60)'", '-c:v', 'libx264', '-threads', '1', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k', '-shortest', '-movflags', '+faststart', str(root / 'sync-markers.mp4'))
     with wave.open(str(root / 'tone-impulses.wav'), 'wb') as w:
         w.setparams((1, 2, 48000, 48000, 'NONE', 'not compressed'))
         samples=[]
