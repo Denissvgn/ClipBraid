@@ -25,7 +25,7 @@ be retried in the editor.
 
 ## Make a video
 
-1. **Add visuals** to put video clips and photos on the timeline.
+1. **Add visuals** to choose one video or photo; repeat for each item.
 2. **Add audio** to choose one or more files. Files chosen together start at the
    playhead on separate, parallel tracks.
 3. Turn **Original video sound** off for your own soundtrack, or select a clip
@@ -34,33 +34,14 @@ be retried in the editor.
    **Export video** makes an MP4 to watch or share. **Open project** loads a JSON
    project; **Restore local revision** recovers a browser autosave.
 
-Track volumes share the same overlap headroom in preview and export. New project
-files use format version 2; unversioned RED VOX and version 1 drafts remain
-readable. A loaded project keeps its chosen basename when saved; unsafe filename
-characters are sanitized. These readers
-and existing developer-tool identifiers remain compatible throughout the 2.x line.
+Track volumes share the same overlap headroom in preview and export. Output is
+re-encoded to 480p/720p at up to 30 fps SDR. File sizes are estimates; check your
+actual downloads or host storage after handoff. This is an experimental editor;
+physical device and Flow support is still being tested.
 
-Exports are resized/re-encoded to the chosen 480p/720p profile at up to 30 fps SDR.
-File sizes are advisory bitrate estimates; video handoff is capped at 96 MiB and
-host limits may be lower. **Download started** means the browser initiated a
-download; check your downloads for the saved file. **Host accepted** means the
-embedded host acknowledged the handoff. Final device storage belongs to that
-browser or host.
-
-Local autosave offers browser revision recovery. Keep originals and download a
-separate project backup; browser storage can be removed externally. Undo is not
-available yet. The browser recorder supports early stop and cancel; host recording
-requires explicit stop/cancel hooks. Unsupported host capabilities are reported.
-Keep the same site origin when upgrading to retain local revisions. Download a
-project file before moving to another host or domain; open that file on the new site.
-
-This is an experimental editor. Physical browser/device/Flow support and broader
-media qualification remain in progress.
-
-Media processing runs in your browser. Embedded-host file selection, recording,
-and save/download actions use that host’s integration. Export summaries stay in
-this browser; copied summaries omit filenames, paths and media. **Details → Export
-history** provides these summaries and a clear-history action.
+- [Editing, project backups, export and recovery](guides/using-clipbraid.md)
+- [Browser support, profiles, storage and networking](guides/support.md)
+- [Upgrading and older RED VOX projects](guides/upgrading.md)
 
 ## Checks
 

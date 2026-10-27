@@ -2,7 +2,8 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync, existsSync, realpathSync, lstatSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
-const directories = new Set(["components", "services", "scripts", "tests", "types", "mcp-server", ".github", "assets", "licenses"]);
+const directories = new Set(["components", "services", "scripts", "tests", "types", "mcp-server", ".github", "assets", "licenses", "guides"]);
+const publicGuides = new Set(["guides/using-clipbraid.md", "guides/support.md", "guides/upgrading.md"]);
 const rootInputs = new Set([".node-version", ".npmrc", ".gitignore", "LICENSE", "README.md", "THIRD_PARTY_NOTICES.md"]);
 const git = (root, args) => execFileSync("git", args, {encoding:"utf8",cwd:root,timeout:5000,maxBuffer:4*1024*1024,stdio:["ignore","pipe","ignore"]});
 function hasRepository(root) {
@@ -30,7 +31,7 @@ export function sourceIdentity(root = process.cwd()) {
     paths = walk();
   }
   const inputs = [...new Set(paths)].filter(path => !path.includes("/") || directories.has(path.split("/")[0]))
-    .filter(path => /\.(?:[cm]?tsx?|[cm]?jsx?|css|html|json|ya?ml|py)$/.test(path) || rootInputs.has(path)
+    .filter(path => /\.(?:[cm]?tsx?|[cm]?jsx?|css|html|json|ya?ml|py)$/.test(path) || rootInputs.has(path) || publicGuides.has(path)
       || path.startsWith("assets/") || path.startsWith("licenses/") || (path.startsWith("tests/fixtures/") && !/\.(?:md|mdx)$/i.test(path)))
     .sort().flatMap(path => {
       const file=join(root,path);let stat;

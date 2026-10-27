@@ -28,6 +28,9 @@ __pycache__/
 *.mdx
 !/README.md
 !/THIRD_PARTY_NOTICES.md
+!/guides/using-clipbraid.md
+!/guides/support.md
+!/guides/upgrading.md
 /docs/
 /notes/
 /plans/
