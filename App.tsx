@@ -20,6 +20,7 @@ import {
 import { MediaSourceStore, type SourceLease } from "./services/mediaSources";
 import { ProjectWork, type ProjectWorkUnit } from "./services/projectWork";
 import { EditHistory, type ProjectContent } from "./services/editHistory";
+import { PlaybackClock } from "./services/playbackClock";
 import { ExportJobs } from "./services/exportJob";
 import { runExportPipeline } from "./services/exportPipeline";
 import { ProxyQueue } from "./services/proxyQueue";
@@ -188,11 +189,21 @@ export default function App() {
   const editHistory = historyRef.current;
   const historyState = useSyncExternalStore(editHistory.subscribe, editHistory.getSnapshot);
   const { mediaAssets, audioTracks, aspectRatio, fitMode, transitionDuration } = historyState.project;
+  const clockRef = useRef<PlaybackClock | null>(null);
+  if(!clockRef.current)clockRef.current=new PlaybackClock();
+  const playbackClock=clockRef.current;
+  const playbackState=useSyncExternalStore(playbackClock.subscribe,playbackClock.getSnapshot);
+  const currentTime=playbackState.time,isPlaying=playbackState.playing;
+  const setIsPlaying=useCallback((playing:boolean)=>{if(playing)void playbackClock.play();else playbackClock.pause()},[playbackClock]);
+  const setCurrentTime=useCallback((value:React.SetStateAction<number>)=>{
+    const project=editHistory.getSnapshot().project;playbackClock.setDuration(projectDuration(project.mediaAssets,project.audioTracks));
+    playbackClock.seek(typeof value === "function"?value(playbackClock.getTime()):value);
+  },[playbackClock,editHistory]);
+  const playbackFailure=useCallback((message:string)=>playbackClock.fail(message),[playbackClock]);
+
   const [showIntro, setShowIntro] = useState(true);
   const [projectFilename, setProjectFilename] = useState<string | null>(null);
-  const [currentTime, setCurrentTime] = useState(0);
   const [seekRevision, setSeekRevision] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
   const [zoom, setZoom] = useState(40);
   const [status, setStatus] = useState("BOOTING...");
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
@@ -212,9 +223,6 @@ export default function App() {
   const [showSafeZones, setShowSafeZones] = useState(false);
   const [isTheaterMode, setIsTheaterMode] = useState(false);
   const [showJournal, setShowJournal] = useState(false);
-  const requestRef = useRef<number | null>(null);
-  const startTimeRef = useRef<number>(0);
-  const playbackStartTimeRef = useRef<number>(performance.now());
   const projectInputRef = useRef<HTMLInputElement>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
   const timelineContainerRef = useRef<HTMLDivElement>(null);
@@ -291,7 +299,7 @@ export default function App() {
   const jobDiagnostics = useJobDiagnostics(exportState);
   const isExporting = exportState.active;
   const exportFailed = exportState.phase === "failed";
-  const previewWorkPaused = isPlaying || isExporting || !exportState.cleanupComplete;
+  const previewWorkPaused = isPlaying || playbackState.preparing || isExporting || !exportState.cleanupComplete;
   useEffect(() => {
     if (exportState.phase === "complete") setStatus("READY");
     if (exportState.phase === "cancelled") setStatus("EXPORT CANCELLED");
@@ -355,6 +363,7 @@ export default function App() {
       exportJobs.dispose();
       recordingEpoch.current++; recordingRef.current?.cancel.abort();
       proxyQueue.dispose();
+      playbackClock.dispose();
       editHistory.dispose();
       storeRef.current!.clear();
     };
@@ -363,6 +372,11 @@ export default function App() {
     () => projectDuration(mediaAssets, audioTracks),
     [mediaAssets, audioTracks],
   );
+  useEffect(()=>{playbackClock.setDuration(totalDuration)},[playbackClock,totalDuration]);
+  useEffect(()=>{
+    const hidden=()=>{const state=playbackClock.getSnapshot();if(document.hidden&&(state.playing||state.preparing))playbackClock.pause("Preview paused while the page was hidden. Press Play when you return.")};
+    document.addEventListener("visibilitychange",hidden);return()=>document.removeEventListener("visibilitychange",hidden);
+  },[playbackClock]);
   const localSnapshot = useMemo(() => ({ mediaAssets, audioTracks, aspectRatio, fitMode,
     transitionDuration, currentTime }), [mediaAssets, audioTracks, aspectRatio, fitMode, transitionDuration, currentTime]);
   const localUI = useMemo(() => ({ exportQuality, zoom, showSafeZones, isTheaterMode,
@@ -380,10 +394,6 @@ export default function App() {
       const clamped = clampPlayhead(t, totalDuration);
       setSeekRevision(value => value + 1);
       setCurrentTime(clamped);
-      if (isPlaying) {
-        startTimeRef.current = clamped;
-        playbackStartTimeRef.current = performance.now();
-      }
     },
     [isPlaying, totalDuration],
   );
@@ -398,8 +408,6 @@ export default function App() {
     const clamped = clampPlayhead(currentTime, totalDuration);
     if (clamped === currentTime) return;
     setCurrentTime(clamped);
-    startTimeRef.current = clamped;
-    playbackStartTimeRef.current = performance.now();
   }, [currentTime, totalDuration]);
   const handleImportMedia = async () => {
     setMediaNotice(null);
@@ -637,33 +645,9 @@ export default function App() {
     }
   };
   const togglePlayback = () => {
-    if (!isPlaying) {
-      playbackStartTimeRef.current = performance.now();
-      startTimeRef.current = currentTime;
-    }
-    setIsPlaying(!isPlaying);
+    const state=playbackClock.getSnapshot();
+    if(state.playing||state.preparing)playbackClock.pause();else void playbackClock.play();
   };
-  const animate = useCallback(
-    (time: number) => {
-      if (!isPlaying) return;
-      const elapsed = (time - playbackStartTimeRef.current) / 1000;
-      const newTime = startTimeRef.current + elapsed;
-      if (newTime >= totalDuration) {
-        setIsPlaying(false);
-        setCurrentTime(totalDuration);
-      } else {
-        setCurrentTime(newTime);
-        requestRef.current = requestAnimationFrame(animate);
-      }
-    },
-    [totalDuration, isPlaying],
-  );
-  useEffect(() => {
-    if (isPlaying) requestRef.current = requestAnimationFrame(animate);
-    return () => {
-      if (requestRef.current) cancelAnimationFrame(requestRef.current);
-    };
-  }, [isPlaying, animate]);
   const handleMoveMedia = useCallback(
     (id: string, direction: "left" | "right") => {
       setMediaAssets((prev) => {
@@ -896,7 +880,6 @@ export default function App() {
         setExportQuality(options.ui.exportQuality); setZoom(options.ui.zoom);
         setShowSafeZones(options.ui.showSafeZones); setIsTheaterMode(options.ui.isTheaterMode);
       }
-      startTimeRef.current = restoredTime;
       cleanupRef.current = {
         mediaAssets: restoredMedia,
         audioTracks: restoredAudio,
@@ -1034,6 +1017,7 @@ export default function App() {
       },
       proxyState: proxyQueue.getSnapshot,
       mediaInventory: () => storeRef.current!.snapshot(),
+      playbackClock: playbackClock.observe,
       localRecovery: () => ({ status: recoveryStateRef.current.status, revision: recoveryStateRef.current.revision,
         usage: recoveryStateRef.current.usage }),
       exportState: exportJobs.getSnapshot,
@@ -1136,6 +1120,7 @@ export default function App() {
         currentTime={currentTime}
         isPlaying={isPlaying}
         seekRevision={seekRevision}
+        timeAt={playbackClock.getTime} onPlaybackError={playbackFailure}
       />
       <input
         type="file"
@@ -1264,6 +1249,10 @@ export default function App() {
           optimized previews never change project or export sources.
         </p>
       )}
+      {(playbackState.error||playbackState.notice||playbackState.preparing)&&<section className="source-notice" role={playbackState.error?"alert":"status"}>
+        <p>{playbackState.error||playbackState.notice||"Preparing preview playback…"}</p>
+        {!playbackState.preparing&&<button className="button secondary" onClick={playbackClock.clearError}>Dismiss playback message</button>}
+      </section>}
       <main className="editor-workspace">
         <section className="preview-workspace" aria-label="Video preview">
           <div className="preview-heading">
@@ -1298,6 +1287,7 @@ export default function App() {
               fitMode={fitMode}
               showSafeZones={showSafeZones}
               seekRevision={seekRevision}
+              timeAt={playbackClock.getTime} onPlaybackError={playbackFailure} registerVideo={playbackClock.registerVideo}
             />
             {(isExporting || exportFailed) && <ExportFeedback
               key={exportState.jobId} state={exportState}
@@ -1345,11 +1335,11 @@ export default function App() {
               <button
                 className="play-button"
                 onClick={togglePlayback}
-                aria-label={isPlaying ? "Pause preview" : "Play preview"}
+                aria-label={playbackState.preparing ? "Cancel playback start" : isPlaying ? "Pause preview" : "Play preview"}
                 title="Play/Pause (Space)"
                 disabled={isExporting || (!mediaAssets.length && !audioTracks.length)}
               >
-                <Icon name={isPlaying ? "pause" : "play"} size={21} />
+                <Icon name={isPlaying || playbackState.preparing ? "pause" : "play"} size={21} />
               </button>
               <button
                 className="icon-button"

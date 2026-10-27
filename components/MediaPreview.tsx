@@ -2,6 +2,7 @@ import React, { useMemo } from "react";
 import { MediaAsset } from "../types";
 import { MediaItemPreview } from "./MediaItemPreview";
 import { Icon } from "./Icon";
+import type { PlaybackClock } from "../services/playbackClock";
 import {
   createOpacitySampler,
   intervalsOverlap,
@@ -17,6 +18,9 @@ interface MediaPreviewProps {
   fitMode: "contain" | "cover";
   showSafeZones: boolean;
   seekRevision?: number;
+  timeAt?: () => number;
+  onPlaybackError?: (message: string) => void;
+  registerVideo?: PlaybackClock["registerVideo"];
 }
 export const MediaPreview: React.FC<MediaPreviewProps> = ({
   mediaAssets,
@@ -27,6 +31,7 @@ export const MediaPreview: React.FC<MediaPreviewProps> = ({
   fitMode,
   showSafeZones,
   seekRevision = 0,
+  timeAt,onPlaybackError,registerVideo,
 }) => {
   const mountedAssets = useMemo(
     () =>
@@ -79,6 +84,8 @@ export const MediaPreview: React.FC<MediaPreviewProps> = ({
               opacity={calculateOpacity(asset)}
               zIndex={isIntervalActive(asset, currentTime) ? 2 : 1}
               seekRevision={seekRevision}
+              timeAt={timeAt} onPlaybackError={onPlaybackError} registerVideo={registerVideo}
+              opacityAt={sampleOpacity}
             />
           ))}
           {showSafeZones && (

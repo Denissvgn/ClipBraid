@@ -1,7 +1,7 @@
 export const REQUIRED_BROWSER_SPECS = [
   'adapters.spec.mjs', 'audio-windows.spec.mjs', 'audio.spec.mjs', 'cancellation.spec.mjs', 'clipbraid.spec.mjs', 'decoder-reuse.spec.mjs',
   'delivery.spec.mjs', 'diagnostic-history.spec.mjs', 'diagnostics.spec.mjs', 'edit-history.spec.mjs', 'encoder-plan.spec.mjs', 'export-feedback.spec.mjs', 'export-size.spec.mjs', 'export.spec.mjs',
-  'fidelity.spec.mjs', 'identity.spec.mjs', 'keyboard.spec.mjs', 'mix-levels.spec.mjs', 'originals.spec.mjs',
+  'fidelity.spec.mjs', 'identity.spec.mjs', 'keyboard.spec.mjs', 'mix-levels.spec.mjs', 'originals.spec.mjs', 'playback.spec.mjs',
   'preflight.spec.mjs', 'product-language.spec.mjs', 'project-schema.spec.mjs', 'project-transaction.spec.mjs',
   'proxies.spec.mjs', 'recovery.spec.mjs', 'regressions.spec.mjs', 'review.spec.mjs', 'sources.spec.mjs', 'usability.spec.mjs', 'worker-startup.spec.mjs',
 ];

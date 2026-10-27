@@ -27,6 +27,11 @@ track volumes. More simultaneous sound sources can make the whole mix quieter.
 An overload error asks you to reduce a volume; the editor does not silently clip it.
 An audio track extending past the last visual produces a black video tail.
 
+Preview pauses when the page is hidden, playback permission is denied, or a
+required source stalls. Read the playback message and press **Play** to retry;
+returning to the page does not resume it automatically. Late video frames can
+slow preview progression. Export uses the saved timeline timing independently.
+
 ## Save an editable project or export a video
 
 | Action | Result | Use it for |
