@@ -120,3 +120,50 @@ test('qualification cannot create a lock beneath a linked reports directory', as
     assert.deepEqual(await readdir(outside), []);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test('simultaneous root aliases share a lock and cannot release another owner', async () => {
+  const { directory, physical, alias } = await aliasedQualificationRoot();
+  let owner;
+  try {
+    const attempts = await Promise.allSettled([createQualificationRun(alias), createQualificationRun(physical)]);
+    const accepted = attempts.filter(result => result.status === 'fulfilled');
+    const rejected = attempts.filter(result => result.status === 'rejected');
+    assert.equal(accepted.length, 1); assert.equal(rejected.length, 1);
+    owner = accepted[0].value;
+    assert.match(String(rejected[0].reason), /already running/);
+    const ownerFile = path.join(physical, 'reports/qualification.lock/owner.json');
+    const original = await readFile(ownerFile);
+    const replacement = JSON.stringify({ runId: 'different-owner', pid: process.pid });
+    await writeFile(ownerFile, replacement);
+    await assert.rejects(owner.release(), /ownership changed/);
+    assert.equal(await readFile(ownerFile, 'utf8'), replacement);
+    await writeFile(ownerFile, original);
+    await owner.release(); owner = undefined;
+    await assert.rejects(readdir(path.dirname(ownerFile)), { code: 'ENOENT' });
+  } finally {
+    try { await owner?.release(); }
+    finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test('failed qualification initialization leaves no lock and never creates an absent root', async () => {
+  const { directory, physical, alias } = await aliasedQualificationRoot();
+  let owner;
+  try {
+    const missing = path.join(directory, 'missing');
+    await assert.rejects(createQualificationRun(missing), { code: 'ENOENT' });
+    await assert.rejects(archiveQualification({ status: 'failed', steps: [] }, 'reports/archive', [], missing), { code: 'ENOENT' });
+    await assert.rejects(readdir(missing), { code: 'ENOENT' });
+    const canonical = path.join(physical, 'reports/qualification/candidate.json');
+    await mkdir(path.dirname(canonical), { recursive: true });
+    await writeFile(canonical, 'x'.repeat(2 * 1024 * 1024 + 1));
+    await assert.rejects(createQualificationRun(alias), /read limit/);
+    await assert.rejects(readdir(path.join(physical, 'reports/qualification.lock')), { code: 'ENOENT' });
+    await writeFile(canonical, '{}');
+    owner = await createQualificationRun(physical);
+    assert.equal(await readFile(path.join(owner.absoluteArchive, 'previous-candidate.json'), 'utf8'), '{}');
+  } finally {
+    try { await owner?.release(); }
+    finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});

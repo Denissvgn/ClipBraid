@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,writeFile,readFile,mkdir,symlink,rm,cp} from 'node:fs/promises';
+import {mkdtemp,writeFile,readFile,mkdir,symlink,rm,cp,realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {readBounded,appendJournal,readExportLog} from '../../mcp-server/storage.js';
@@ -108,4 +108,20 @@ test('O02: actual MCP tools redact current summaries and classify invalid JSON a
     const invalid=await client.callTool({name:'e2e_status',arguments:{name:'latest'}});
     assert.equal(invalid.isError,undefined);assert.equal(JSON.parse(invalid.content[0].text).verdict,'UNKNOWN');
   }finally{await client?.close();await transport?.close();await rm(root,{recursive:true,force:true})}
+});
+
+test('project state reads a matching manifest through a trusted root alias without verifying artifact bytes', async () => {
+  const directory = await realpath(await temporary());
+  const physical = path.join(directory, 'physical'), alias = path.join(directory, 'alias');
+  try {
+    await mkdir(path.join(physical, 'reports'), { recursive: true });
+    await symlink(physical, alias, 'dir');
+    const hash = 'd'.repeat(64);
+    await writeFile(path.join(physical, 'reports/build-artifacts.json'), JSON.stringify({ source: { inputsSha256: hash }, buildId: `${hash}:production` }));
+    const state = createProjectState(alias, async () => ({ stdout: 'main' }), async () => ({ status: 200 }), () => ({ sha256: hash }));
+    const result = await state();
+    assert.equal(result.typecheckStatus, 'passed');
+    assert.equal(result.build.sourceMatches, true);
+    assert.equal(result.build.artifactsVerified, false);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
