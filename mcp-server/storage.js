@@ -66,6 +66,7 @@ export async function readExportLog(file, legacyFile = undefined, root = undefin
 /** An exclusive lock covers read/modify/rename across clients and server processes. */
 export async function appendJournal(file, title, body, timeZone = "Europe/Moscow", root = undefined) {
   file = await regularPath(file, root);
+  if (root != null) root = await realpath(path.resolve(root));
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const lock = `${file}.lock`, temp = `${file}.${randomUUID()}.tmp`, deadline = Date.now() + 5000;
   while (true) {
