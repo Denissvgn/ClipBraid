@@ -32,6 +32,7 @@ export function mediaRecovery(category: string): string {
   return ({ denied: "Allow file or microphone access in your browser or host settings, then try again.",
     unsupported: "Choose supported media or open the project in a Chromium browser; this host cannot perform the requested action.",
     "size-limit": "Choose a smaller file or shorter recording and try again.",
+    media: "Try the complete original file or another supported format.",
     cancelled: "You can continue editing or try the action again.",
     unknown: "Check the host’s files or recording controls before retrying; the action may have started.",
     rejected: "Check the selected file and host permissions, then try again.",
@@ -43,7 +44,7 @@ export function mediaRecovery(category: string): string {
 
 export function mediaNoticeTitle(category: string): string {
   return ({ cancelled: "Action cancelled.", denied: "Access needed.", unsupported: "Action unavailable here.",
-    "size-limit": "File too large.", project: "Project could not be opened.", relink: "Original file could not be relinked.",
+    "size-limit": "File too large.", media: "Media could not be read.", project: "Project could not be opened.", relink: "Original file could not be relinked.",
     unknown: "The outcome is unconfirmed.", rejected: "The action was declined.", transport: "The action could not finish." } as Record<string, string>)[category]
     ?? "The action could not finish.";
 }

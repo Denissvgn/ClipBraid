@@ -7,7 +7,7 @@ import React, {
   useSyncExternalStore,
 } from "react";
 import { Flow, audioFileType } from "./platform";
-import { platformFailure } from "./services/platformError";
+import { platformFailure, PlatformError } from "./services/platformError";
 import { recordedDuration } from "./services/audioDuration";
 import { sourceHasAudio } from "./services/sourceAudio";
 import {
@@ -98,7 +98,7 @@ const probeVideoSource = async (
   try {
     signal?.throwIfAborted();
     const video = await input.getPrimaryVideoTrack();
-    if (!video) throw new Error("The selected file has no video track.");
+    if (!video) throw new PlatformError("The selected file has no video track.", "media");
     const fps = (
       await video.computeFrameRateMetrics({ targetPacketCount: 128 })
     ).bestGuessFrameRate;
@@ -121,7 +121,7 @@ const probeDuration = (
   return new Promise((resolve, reject) => {
     const element = document.createElement(type === "image" ? "img" : type);
     const timer = setTimeout(
-      () => finish(new Error("Media metadata timed out.")),
+      () => finish(new PlatformError("Media metadata timed out.", "media")),
       15_000,
     );
     const finish = (error?: Error, duration?: number) => {
@@ -140,13 +140,13 @@ const probeDuration = (
     const abort = () => finish(signal?.reason ?? new DOMException("Action cancelled", "AbortError"));
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) { abort(); return; }
-    element.onerror = () => finish(new Error("Cannot read this media file."));
+    element.onerror = () => finish(new PlatformError("Cannot read this media file.", "media"));
     if (element instanceof HTMLMediaElement) {
       element.preload = "metadata";
       element.onloadedmetadata = () => {
         const duration = element.duration;
         if (!Number.isFinite(duration) || duration <= 0)
-          finish(new Error("Invalid media duration."));
+          finish(new PlatformError("Invalid media duration.", "media"));
         else finish(undefined, duration);
       };
     } else element.onload = () => finish(undefined, 5);
