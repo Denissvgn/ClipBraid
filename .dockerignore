@@ -195,6 +195,7 @@
 !tests/unit/baseline.test.mjs
 !tests/unit/compatibility.test.mjs
 !tests/unit/container-context.test.mjs
+!tests/unit/container-platform.test.mjs
 !tests/unit/delivery.test.mjs
 !tests/unit/diagnostic-policy.test.mjs
 !tests/unit/diagnostics.test.mjs

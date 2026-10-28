@@ -20,9 +20,16 @@ let created = false, attempted = false;
 try {
   const imageInfo = JSON.parse(run(['image', 'inspect', image]))[0];
   result.imageId = imageInfo.Id;
+  const platform = process.env.DOCKER_DEFAULT_PLATFORM || run(['version', '--format', '{{.Server.Os}}/{{.Server.Arch}}']);
+  assert.match(platform, /^linux\/[a-z0-9_]+(?:\/[a-z0-9_.-]+)?$/, 'Select a canonical Linux Docker platform');
+  const [system, architecture] = platform.split('/');
+  result.requestedPlatform = platform;
+  result.imagePlatform = `${imageInfo.Os}/${imageInfo.Architecture}`;
+  assert.equal(imageInfo.Os, system, 'Image OS must match the selected platform');
+  assert.equal(imageInfo.Architecture, architecture, 'Image architecture must match the selected platform');
   assert.equal(imageInfo.Config.User, '101:101', 'Image must default to its non-root user');
   attempted = true;
-  run(['run', '--detach', '--name', name, '--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=16m',
+  run(['run', '--platform', platform, '--detach', '--name', name, '--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=16m',
     '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true', '--publish', '127.0.0.1::8080', image]);
   created = true;
   const expires = performance.now() + 30000;
@@ -79,7 +86,7 @@ try {
   // The source target exports the real Docker-filtered context. This checks
   // literal exceptions and containment, rather than approximating Docker globs.
   const contextRoot = join(directory, 'context');
-  run(['build', '--target', 'source', '--output', `type=local,dest=${contextRoot}`, '.']);
+  run(['build', '--platform', platform, '--target', 'source', '--output', `type=local,dest=${contextRoot}`, '.']);
   const inventory = (directory) => readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
     const file = join(directory, entry.name), stat = lstatSync(file);
     assert(!stat.isSymbolicLink(), 'Context must not contain symlinks');
