@@ -14,22 +14,40 @@ test("picker cancellation removes temporary controls and invalid host media pres
 });
 async function syntheticMicrophone(page){
   await page.addInitScript(()=>{
-    window.captureMode="normal";window.capturedTracks=[];
+    window.captureMode="normal";window.capturedTracks=[];window.captureContexts=[];window.captureStarts=[];
+    const NativeRecorder=MediaRecorder;
+    window.MediaRecorder=class extends NativeRecorder{
+      start(...args){
+        const context=window.captureContexts.at(-1);
+        this.addEventListener("start",()=>window.captureStarts.push({context,time:context.currentTime}),{once:true});
+        return super.start(...args);
+      }
+    };
     const make=()=>{const context=new AudioContext(),oscillator=context.createOscillator(),destination=context.createMediaStreamDestination();oscillator.connect(destination);oscillator.start();
+      window.captureContexts.push(context);
       const track=destination.stream.getTracks()[0],stop=track.stop.bind(track);let ended=false;track.stop=()=>{if(ended)return;ended=true;stop();oscillator.stop();void context.close()};window.capturedTracks.push(track);return destination.stream};
     Object.defineProperty(navigator.mediaDevices,"getUserMedia",{value:async()=>{
       if(window.captureMode==="denied")throw new DOMException("Microphone denied","NotAllowedError");
-      if(window.captureMode==="pending")return new Promise(resolve=>{window.resolveCapture=()=>resolve(make())});return make();
+      if(window.captureMode==="pending")return new Promise(resolve=>{window.resolveCapture=()=>resolve(make())});
+      const stream=make();if(window.captureMode==="delayed")await new Promise(resolve=>setTimeout(resolve,600));return stream;
     }});
   });
 }
+async function capturedAudioReady(page,seconds){
+  await page.waitForFunction(seconds=>{
+    const started=window.captureStarts.at(-1);
+    return started&&started.context.state==="running"&&started.context.currentTime-started.time>=seconds;
+  },seconds,{timeout:5000});
+}
 test("native recorder stop uses actual media duration and cancel/denial/error stop every track",async({page})=>{
   await syntheticMicrophone(page);await openEditor(page);await loadDraft(page,draft([await asset("landscape-red.png")]));
+  await page.evaluate(()=>{window.captureMode="delayed"});
   await page.getByText("Record voice-over",{exact:true}).click();await page.getByRole("button",{name:"Start recording",exact:true}).click();
-  await expect(page.getByRole("button",{name:"Stop recording and keep audio",exact:true})).toBeVisible();await page.waitForTimeout(450);
+  await expect(page.getByRole("button",{name:"Stop recording and keep audio",exact:true})).toBeVisible();await capturedAudioReady(page,.45);
   await page.getByRole("button",{name:"Stop recording and keep audio",exact:true}).click();await expect(page.locator('[data-audio-track]')).toHaveCount(1);
   const recorded=(await saveDraft(page)).audioTracks[0];expect(recorded.duration).toBeGreaterThan(.1);expect(recorded.duration).toBeLessThan(2);
   expect(await page.evaluate(()=>window.capturedTracks.every(track=>track.readyState==="ended"))).toBe(true);
+  await page.evaluate(()=>{window.captureMode="normal"});
   await page.getByRole("button",{name:"Start recording",exact:true}).click();await page.waitForTimeout(100);await page.getByRole("button",{name:"Cancel recording",exact:true}).click();
   await expect(page.locator('[data-editor-status="RECORD CANCELLED"]')).toBeVisible();await expect(page.locator('[data-audio-track]')).toHaveCount(1);
   await page.evaluate(()=>{window.captureMode="denied"});await page.getByRole("button",{name:"Start recording",exact:true}).click();await expect(page.locator('[data-media-category="denied"]')).toContainText("Access needed.");
@@ -81,7 +99,7 @@ for(const action of ["cancel","replace"])test(`recording ${action} during source
   });
   await openEditor(page);await loadDraft(page,draft([await asset("landscape-red.png")]));
   await page.getByText("Record voice-over",{exact:true}).click();await page.getByRole("button",{name:"Start recording",exact:true}).click();
-  await expect(page.getByRole("button",{name:"Stop recording and keep audio",exact:true})).toBeVisible();await page.waitForTimeout(200);
+  await expect(page.getByRole("button",{name:"Stop recording and keep audio",exact:true})).toBeVisible();await capturedAudioReady(page,.2);
   await page.evaluate(()=>{window.holdRecordingHash=true});await page.getByRole("button",{name:"Stop recording and keep audio",exact:true}).click();
   await page.waitForFunction(()=>window.releaseRecordingHash);
   if(action==="cancel")await page.getByRole("button",{name:"Cancel recording",exact:true}).click();
