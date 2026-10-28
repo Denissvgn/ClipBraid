@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {assessPlaywright,assessSmokeEvidence} from '../../scripts/qualification-policy.mjs';
 import {processSucceeded} from '../../scripts/qualification-policy.mjs';
 import {createQualificationRun,archiveQualification} from '../../scripts/qualification-evidence.mjs';
-import {mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,readFile,rm,realpath,symlink,readdir} from 'node:fs/promises';
 import path from 'node:path';
 import {tmpdir} from 'node:os';
 import {createHash} from 'node:crypto';
@@ -52,4 +52,71 @@ test('Q01: changed or absent received output cannot be archived as passed eviden
     await assert.rejects(archiveQualification({status:'passed',steps:[]},run.archiveDirectory,['reports/browser-manifest.json'],root),/evidence changed/);
     await run.release();
   }finally{await rm(root,{recursive:true,force:true})}
+});
+
+async function aliasedQualificationRoot() {
+  const directory = await realpath(await mkdtemp(path.join(tmpdir(), 'clipbraid-qualification-root-')));
+  const physical = path.join(directory, 'physical'), alias = path.join(directory, 'alias');
+  await mkdir(physical);
+  await symlink(physical, alias, 'dir');
+  return { directory, physical, alias };
+}
+
+test('trusted root aliases share locks and preserve independent qualification snapshots', async () => {
+  const { directory, physical, alias } = await aliasedQualificationRoot();
+  let owner;
+  try {
+    owner = await createQualificationRun(alias);
+    assert.equal(path.dirname(owner.absoluteArchive), path.join(physical, 'reports/qualification-runs'));
+    await assert.rejects(createQualificationRun(physical), /already running/);
+    const file = 'reports/example.json', original = Buffer.from('first result');
+    await writeFile(path.join(alias, file), original);
+    const archived = await archiveQualification({ status: 'failed', steps: [] }, owner.archiveDirectory, [file], alias);
+    assert.equal(archived.artifacts[0].sha256, createHash('sha256').update(original).digest('hex'));
+    await writeFile(path.join(physical, file), 'replacement result');
+    assert.deepEqual(await readFile(path.join(physical, archived.artifacts[0].archivePath)), original);
+    const previousRun = owner.runId;
+    await owner.release(); owner = undefined;
+    const previous = JSON.stringify({ status: 'failed', runId: previousRun });
+    await writeFile(path.join(alias, 'reports/qualification/candidate.json'), previous);
+    owner = await createQualificationRun(physical);
+    assert.notEqual(owner.runId, previousRun);
+    assert.equal(await readFile(path.join(owner.absoluteArchive, 'previous-candidate.json'), 'utf8'), previous);
+  } finally {
+    try { await owner?.release(); }
+    finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test('archiving through a trusted alias rejects unapproved paths and linked input files', async () => {
+  const { directory, physical, alias } = await aliasedQualificationRoot();
+  try {
+    await mkdir(path.join(physical, 'reports'));
+    await writeFile(path.join(physical, 'reports/example.json'), 'received bytes');
+    const result = await archiveQualification({ status: 'failed', steps: [] }, 'reports/archive', ['reports/example.json'], alias);
+    assert.equal(await readFile(path.join(physical, result.artifacts[0].archivePath), 'utf8'), 'received bytes');
+    await assert.rejects(
+      archiveQualification({ status: 'failed', steps: [] }, 'reports/rejected', ['reports/../outside.json'], alias),
+      /Unapproved qualification evidence path/,
+    );
+    const outside = path.join(directory, 'outside.json');
+    await writeFile(outside, 'outside bytes');
+    await symlink(outside, path.join(physical, 'reports/linked.json'));
+    await assert.rejects(
+      archiveQualification({ status: 'failed', steps: [] }, 'reports/rejected', ['reports/linked.json'], alias),
+      /symlink/i,
+    );
+    assert.equal(await readFile(outside, 'utf8'), 'outside bytes');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('qualification cannot create a lock beneath a linked reports directory', async () => {
+  const { directory, physical, alias } = await aliasedQualificationRoot();
+  try {
+    const outside = path.join(directory, 'outside');
+    await mkdir(outside);
+    await symlink(outside, path.join(physical, 'reports'), 'dir');
+    await assert.rejects(createQualificationRun(alias), /symlink/i);
+    assert.deepEqual(await readdir(outside), []);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

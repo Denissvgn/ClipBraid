@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, readFile, symlink, rm, readdir } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, symlink, rm, readdir, realpath, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -35,4 +35,35 @@ test("log reads are bounded and fixed-path symlinks cannot redirect a read", asy
     await symlink(file,path.join(root,"redirect"));
     await assert.rejects(()=>readBounded(path.join(root,"redirect"),128,true));
   } finally { await rm(root,{recursive:true,force:true}); }
+});
+
+test("journal appends accept an explicitly trusted directory alias", async () => {
+  const directory = await realpath(await mkdtemp(path.join(tmpdir(), "clipbraid-journal-root-")));
+  const physical = path.join(directory, "physical"), alias = path.join(directory, "alias");
+  try {
+    await mkdir(physical); await symlink(physical, alias, "dir");
+    await appendJournal(path.join(alias, "JOURNAL.md"), "first entry", "synthetic body", "UTC", alias);
+    await appendJournal(path.join(physical, "JOURNAL.md"), "second entry", "synthetic body", "UTC", physical);
+    const entries = parseJournal(await readFile(path.join(physical, "JOURNAL.md"), "utf8"));
+    assert.equal(entries.length, 2);
+    assert.match(entries[0].title, /second entry/);
+    assert.match(entries[1].title, /first entry/);
+    assert.deepEqual(await readdir(physical), ["JOURNAL.md"]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("explicit roots reject sibling paths, traversal and descendant directory links", async () => {
+  const directory = await realpath(await mkdtemp(path.join(tmpdir(), "clipbraid-storage-boundary-")));
+  const root = path.join(directory, "root"), sibling = path.join(directory, "root-other");
+  try {
+    await mkdir(root); await mkdir(sibling);
+    const outside = path.join(sibling, "JOURNAL.md");
+    await writeFile(outside, "outside bytes");
+    await assert.rejects(readBounded(outside, 128, false, root), /outside its allowed root/);
+    const traversal = `${root}${path.sep}..${path.sep}root-other${path.sep}JOURNAL.md`;
+    await assert.rejects(readBounded(traversal, 128, false, root), /outside its allowed root/);
+    await symlink(sibling, path.join(root, "redirect"), "dir");
+    await assert.rejects(appendJournal(path.join(root, "redirect/JOURNAL.md"), "blocked", "body", "UTC", root), /symlink/i);
+    assert.equal(await readFile(outside, "utf8"), "outside bytes");
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
