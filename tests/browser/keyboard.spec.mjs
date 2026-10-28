@@ -18,8 +18,9 @@ test("keyboard selection, editing, seeking and dialogs retain focus without edit
   await expect(page.getByRole("button", { name: "Relink original video", exact: true })).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(page.getByLabel("Look", { exact: true })).toBeFocused();
-  await page.keyboard.press("End");
-  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("Space");
+  await page.keyboard.press("w");
+  await page.keyboard.press("Enter");
   await expect(page.getByLabel("Look", { exact: true })).toHaveValue("warm");
   await page.keyboard.press("Shift+Tab");
   await page.keyboard.press("Shift+Tab");
@@ -38,7 +39,9 @@ test("keyboard selection, editing, seeking and dialogs retain focus without edit
   await page.keyboard.press("Enter");
   const stream = await (await saved).createReadStream(), parts = [];
   for await (const part of stream) parts.push(part);
-  expect(JSON.parse(Buffer.concat(parts).toString()).currentTime).toBeGreaterThan(0);
+  const savedProject = JSON.parse(Buffer.concat(parts).toString());
+  expect(savedProject.currentTime).toBeGreaterThan(0);
+  expect(savedProject.mediaAssets[0].filter).toBe("warm");
   for (const name of ["About ClipBraid", "Details"]) {
     const opener = page.getByRole("button", { name, exact: true });
     await opener.focus();
