@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, lstat, readdir, rm } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, lstat, readdir, rm, realpath } from 'node:fs/promises';
 import { randomUUID, createHash } from 'node:crypto';
 import path from 'node:path';
 import { safeFilePath, readBounded, MAX_JOURNAL_BYTES } from '../mcp-server/storage.js';
@@ -8,7 +8,7 @@ const allowed=file=>typeof file==='string'&&!path.isAbsolute(file)&&!file.includ
 
 /** One owner per checkout; completed run directories are never reused. */
 export async function createQualificationRun(root=process.cwd()) {
-  root=path.resolve(root);const runId=randomUUID(),archiveDirectory=`reports/qualification-runs/${runId}`;
+  root=await realpath(path.resolve(root));const runId=randomUUID(),archiveDirectory=`reports/qualification-runs/${runId}`;
   const owner=await safeFilePath(path.join(root,'reports/qualification.lock/owner.json'),root),lock=path.dirname(owner);
   await mkdir(path.dirname(lock),{recursive:true,mode:0o700});
   try{await mkdir(lock,{mode:0o700})}catch(error){if(error.code==='EEXIST')throw new Error('Qualification is already running or its abandoned lock needs manual recovery.');throw error}
@@ -30,7 +30,7 @@ export async function createQualificationRun(root=process.cwd()) {
 
 /** Preserve exact owned output bytes, never another run's canonical filenames. */
 export async function archiveQualification(manifest,archiveDirectory,reportFiles,root=process.cwd()) {
-  root=path.resolve(root);const files=new Map(),notes=[];
+  root=await realpath(path.resolve(root));const files=new Map(),notes=[];
   const add=(file,expected)=>{
     if(!allowed(file))throw new Error('Unapproved qualification evidence path.');
     files.set(file,expected??files.get(file));

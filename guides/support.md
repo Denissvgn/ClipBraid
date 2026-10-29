@@ -8,13 +8,18 @@ will export on that device.
 | Target | Evidence available | Support boundary |
 | --- | --- | --- |
 | Linux x86_64, pinned Chromium 153.0.8010.12, GPU/video acceleration disabled | Automated media/recovery cases and the 23-clip reference at Draft/Standard, including a repeat and native-audio variant | This software test environment only; it is not a physical-device or performance guarantee |
-| Physical desktop Chrome | Automated desktop-sized layouts and keyboard cases | Complete physical microphone/storage/device qualification is pending |
+| macOS 26.6.2, Apple M5 Pro with 24 GiB, native Chrome 155.0.8059.85 | Native file handling, editing, preview, project save/open, browser microphone controls and local recovery | This configuration and these workflows; fresh macOS permission prompts and hardware absence remain unqualified |
 | Android and Flow WebView | Adapter-contract and emulated viewport cases | Real Android/Flow device qualification is pending; emulation does not establish host support |
 | Other browser/OS combinations | No complete qualification record | Unqualified; codec or API availability may prevent export |
 
 No general hardware-acceleration claim is made. **Compatibility render (one
 encoder)** reduces simultaneous encoder demand. It does not guarantee sufficient
 memory, codec support, or final file delivery.
+
+Physical qualification does not extend to other Mac models, other macOS
+releases, Safari or Firefox. Performance and output correctness depend on the
+actual project, profile and device; start with a small project and check the
+received file.
 
 ## Output profiles
 
@@ -62,7 +67,11 @@ integration; their permissions, transport and storage behavior belong to that ho
 
 Microphone recording needs browser/host permission and supported recording APIs.
 Cancel and early stop depend on explicit host hooks. If unavailable, record
-externally and import an audio file. Physical permission behavior remains unqualified.
+externally and import an audio file. Use **Stop recording and keep audio** to
+finish early, or **Cancel recording** to discard the capture. If access is
+blocked, check both Chrome's site permission and macOS microphone settings,
+then try again. Fresh macOS permission prompts and hardware absence remain
+unqualified for the configuration above.
 
 A site operator can self-host the pinned UMD `ffmpeg-core.js` and
 `ffmpeg-core.wasm` files and set `window.CLIPBRAID_FFMPEG_CORE_BASE_URL` before

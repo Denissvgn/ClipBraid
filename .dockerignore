@@ -85,6 +85,7 @@
 !services/audio.worker.ts
 !services/audioDuration.ts
 !services/audioWorker.ts
+!services/base64Bytes.ts
 !services/brand.ts
 !services/buildIdentity.ts
 !services/delivery.ts
@@ -192,9 +193,11 @@
 !tests/source-probes.mjs
 !tests/unit/artifacts.test.mjs
 !tests/unit/audio-windows.test.mjs
+!tests/unit/base64-bytes.test.mjs
 !tests/unit/baseline.test.mjs
 !tests/unit/compatibility.test.mjs
 !tests/unit/container-context.test.mjs
+!tests/unit/container-platform.test.mjs
 !tests/unit/delivery.test.mjs
 !tests/unit/diagnostic-policy.test.mjs
 !tests/unit/diagnostics.test.mjs

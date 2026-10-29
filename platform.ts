@@ -2,6 +2,7 @@
 import { PlatformError, platformFailure, abortable } from "./services/platformError";
 import { recordedDuration } from "./services/audioDuration";
 import { saveReceipt } from "./services/saveReceipt";
+import { decodeBase64Bytes } from "./services/base64Bytes";
 export interface SelectedMedia { mediaId: string; base64: string; mimeType: string; type: "image" | "video" | "audio" | string; name: string }
 export interface RecordedAudio { base64: string; mimeType: string; durationMs: number }
 export interface FlowApi {
@@ -115,7 +116,7 @@ function requestPayload(payload: { base64: string; mimeType: string; name?: stri
 }
 async function triggerDownload(payload: { base64: string; mimeType: string; name?: string; filename?: string; signal?: AbortSignal }) {
   const value = requestPayload(payload); payload.signal?.throwIfAborted();
-  const bytes = Uint8Array.from(atob(value.base64), char => char.charCodeAt(0));
+  const bytes = decodeBase64Bytes(value.base64);
   const url = URL.createObjectURL(new Blob([bytes], { type: value.mimeType }));
   try { const anchor = document.createElement("a"); anchor.href = url; anchor.download = value.name || value.filename!; document.body.append(anchor); anchor.click(); anchor.remove(); }
   catch (error) { URL.revokeObjectURL(url); throw error; }
@@ -179,7 +180,7 @@ export const Flow: FlowApi = {
       const result = await abortable(Promise.race([microphone.record({ durationMs: options.durationMs }), controlFailure]), signal);
       recordingReturned = true;
       if (!result || typeof result.mimeType !== "string" || !result.mimeType.startsWith("audio/") || !Number.isFinite(result.durationMs) || result.durationMs <= 0) throw new PlatformError("Invalid host recording response.", "transport");
-      const data = base64(result.base64), blob = new Blob([Uint8Array.from(atob(data), char => char.charCodeAt(0))], { type: result.mimeType });
+      const data = base64(result.base64), blob = new Blob([decodeBase64Bytes(data)], { type: result.mimeType });
       const durationMs = await recordedDuration(blob, options.signal); completed = true;
       return { base64: data, mimeType: result.mimeType, durationMs };
     } finally {

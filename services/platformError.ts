@@ -1,4 +1,4 @@
-export type PlatformCategory = "cancelled" | "denied" | "unsupported" | "transport" | "unknown" | "rejected" | "size-limit";
+export type PlatformCategory = "cancelled" | "denied" | "unsupported" | "transport" | "unknown" | "rejected" | "size-limit" | "media";
 export class PlatformError extends Error {
   constructor(message: string, readonly category: PlatformCategory, readonly deliveryMayHaveStarted = false) {
     super(message); this.name = category === "cancelled" ? "AbortError" : "PlatformError";
@@ -7,7 +7,7 @@ export class PlatformError extends Error {
 export function platformFailure(error: unknown): PlatformError {
   if (error instanceof PlatformError) return error;
   const category = (error as {category?: PlatformCategory})?.category;
-  if (category && ["cancelled","denied","unsupported","transport","unknown","rejected","size-limit"].includes(category))
+  if (category && ["cancelled","denied","unsupported","transport","unknown","rejected","size-limit","media"].includes(category))
     return new PlatformError(String(error), category, (error as {deliveryMayHaveStarted?:boolean}).deliveryMayHaveStarted ?? false);
   const name = (error as { name?: string })?.name;
   const classified = name === "AbortError" ? "cancelled" : ["NotAllowedError", "SecurityError"].includes(name ?? "") ? "denied" :

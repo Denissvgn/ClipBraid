@@ -7,6 +7,18 @@ on or off, globally or per clip.
 ## Get started
 
 Use Node 22.23.3 and npm 11.11.1.
+On Apple Silicon, choose the native ARM64 Node build in your installer or version
+manager. Check the active runtime before installing dependencies:
+
+```bash
+node --version
+npm --version
+node -p "process.platform + '/' + process.arch"
+```
+
+The versions should match the pins above, and a native macOS installation should
+report `darwin/arm64`. Select the pinned native runtime for this project if it
+reports another version or `darwin/x64`, then install dependencies.
 
 ```bash
 npm ci
@@ -34,6 +46,17 @@ docker compose down
 ```
 
 Use `CLIPBRAID_PORT=8090 docker compose up --build --wait` for another local port.
+For native Apple Silicon containers, select ARM64 explicitly:
+
+```bash
+DOCKER_DEFAULT_PLATFORM=linux/arm64 docker compose up --build --wait
+docker build --platform linux/arm64 --tag clipbraid:local .
+DOCKER_DEFAULT_PLATFORM=linux/arm64 npm run container:test -- clipbraid:local
+```
+
+The container checker compares the requested platform with the actual image
+before starting it. Use an image built for the selected platform.
+
 Compose binds to localhost. For remote access, put the service behind an HTTPS
 reverse proxy: browsers require a secure origin for export and microphone APIs.
 Keep a stable browser origin to retain access to existing local drafts.

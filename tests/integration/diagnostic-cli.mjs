@@ -80,7 +80,8 @@ try{
   evidence.positive={...positive,diagnostic:completed,artifactDirectory};
   evidence.status=!positive.timedOut&&positive.exitCode===0&&completed?.status==='passed'?'passed':'failed';
   await writeFile('reports/diagnostic-cli-test.json',JSON.stringify(evidence,null,2)+'\n');
-  assert.equal(evidence.status,'passed','A fresh production build must complete a real diagnostic export.');
+  const failureSummary=JSON.stringify({exitCode:positive.exitCode,signal:positive.signal,timedOut:positive.timedOut,cli:positive.output.slice(-4000)});
+  assert.equal(evidence.status,'passed',`A fresh production build must complete a real diagnostic export. ${failureSummary}`);
   assert.equal(completed.sourceInputsSha256,sourceIdentity().sha256);
   assert.equal(completed.received.bytes,completed.state.result.videoBytes);
   assert.deepEqual(completed.coreAssets.map(file=>file.name).sort(),['ffmpeg-core.js','ffmpeg-core.wasm']);

@@ -181,6 +181,9 @@ test("invalid visual and batched audio imports reject instead of inventing a dur
     await expect(
       page.locator('[data-editor-status="IMPORT ERROR"]'),
     ).toBeVisible();
+    const notice = page.locator('[data-media-category="media"]');
+    await expect(notice).toBeVisible();
+    await expect(notice).toContainText("complete original file");
     expect(await saveDraft(page)).toEqual(before);
   }
   await page.locator('input[accept="audio/*"]').setInputFiles([
@@ -194,7 +197,14 @@ test("invalid visual and batched audio imports reject instead of inventing a dur
   await expect(
     page.locator('[data-editor-status="AUDIO ERROR"]'),
   ).toBeVisible();
+  await expect(page.locator('[data-media-category="media"]')).toContainText("complete original file");
   expect(await saveDraft(page)).toEqual(before);
+  await page.locator('input[accept="audio/*"]').setInputFiles("tests/fixtures/tone-impulses.wav");
+  await expect(page.locator('[data-editor-status="READY"]')).toBeVisible();
+  const recovered = await saveDraft(page);
+  expect(recovered.mediaAssets).toEqual(before.mediaAssets);
+  expect(recovered.audioTracks).toHaveLength(1);
+  await expect(page.locator('[data-media-category="media"]')).toHaveCount(0);
 });
 
 test("corrupt images, missing video tracks and corrupt soundtracks prevent delivery", async ({
