@@ -48,11 +48,27 @@ test("audio engine retries, rebinds and releases every playback lifecycle", asyn
 }, info) => {
   await context.addInitScript(() => {
     const NativeAudio = window.Audio;
+    const currentTime = Object.getOwnPropertyDescriptor(
+      HTMLMediaElement.prototype,
+      "currentTime",
+    );
     window.createdAudio = [];
     window.rejectAudioPlay = false;
     window.unhandledRejections = 0;
     window.Audio = function (...args) {
       const audio = new NativeAudio(...args);
+      audio.seekPositions = [];
+      Object.defineProperty(audio, "currentTime", {
+        configurable: true,
+        get() {
+          return currentTime.get.call(this);
+        },
+        set(value) {
+          currentTime.set.call(this, value);
+          // Capture the native readback before active playback advances it.
+          this.seekPositions.push(currentTime.get.call(this));
+        },
+      });
       audio.releaseCount = 0;
       const load = audio.load;
       audio.load = function (...loadArgs) {
@@ -135,7 +151,9 @@ test("audio engine retries, rebinds and releases every playback lifecycle", asyn
       await render({ isPlaying: true });
       result.played = audible();
       await render({ currentTime: 0.5 });
-      result.seek = last().currentTime;
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      result.seek = last().seekPositions.at(-1);
+      result.seekAtObservation = last().currentTime;
       const beforeMute = last();
       await render({ mediaAssets: [{ ...media, muted: true }] });
       result.mute = {
