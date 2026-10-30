@@ -81,10 +81,10 @@ async function observeNativeSequence(page){
 }
 
 async function shortPreviewClips(count){
-  // A shorter native source models an accepted preview proxy while the
-  // timeline retains its original duration, within the 100 ms proxy allowance.
+  // Keep original geometry truthful; playback uses a validated preview copy.
+  // The selected interval retains the original's longer metadata tail.
   const clip=await asset('oversized-av.mp4',{duration:.58,originalDuration:.58,hasAudio:false,muted:true,
-    sourceFps:30,sourceWidth:640,sourceHeight:360});
+    sourceFps:30,sourceWidth:1600,sourceHeight:900});
   return Array.from({length:count},(_,index)=>({...clip,id:`segment-${index+1}`,name:`segment ${index+1}`,
     startTime:index*.5,transitionDuration:index?.08:0}));
 }
@@ -92,6 +92,7 @@ async function shortPreviewClips(count){
 test('all seventeen clips traverse native EOF and retain soundtrack playback through the audio-only tail',async({page},info)=>{
   await observeNativeSequence(page);await openEditor(page);
   await loadDraft(page,{...draft(await shortPreviewClips(17),[toneTrack(10)]),transitionDuration:.08});
+  expect(await page.evaluate(()=>window.__clipbraidE2E.normalizeAll())).toBe(1);
   const selected=page.getByRole('button',{name:'Edit segment 9',exact:true});await selected.click();
   await expect(selected).toHaveAttribute('aria-pressed','true');
   await page.getByRole('button',{name:'Play preview',exact:true}).click();
@@ -126,6 +127,7 @@ test('all seventeen clips traverse native EOF and retain soundtrack playback thr
 test('seeking back into an exhausted mounted clip clears completion and traverses the next clip again',async({page},info)=>{
   await observeNativeSequence(page);await openEditor(page);
   await loadDraft(page,{...draft(await shortPreviewClips(2),[toneTrack(3)]),transitionDuration:.08});
+  expect(await page.evaluate(()=>window.__clipbraidE2E.normalizeAll())).toBe(1);
   await page.getByRole('button',{name:'Play preview',exact:true}).click();
   await expect.poll(()=>page.evaluate(()=>(window.sequencePlayback.videos[0]?.sequenceEndedEvents===1)
     &&(window.sequencePlayback.videos[1]?.sequencePlayCalls>=1)),{intervals:[25]}).toBe(true);
