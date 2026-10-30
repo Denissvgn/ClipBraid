@@ -72,8 +72,10 @@ async function observeNativeSequence(page){
     };
     setInterval(()=>{
       const slider=document.querySelector('input[aria-label="Playhead time"]');
-      const time=Number(slider?.value),audio=observed.audio.find(element=>element.duration>=9.9);
-      if(time>=9&&time<10&&audio)observed.tail.push({time,audioTime:audio.currentTime,paused:audio.paused,ended:audio.ended});
+      const clock=window.__clipbraidE2E?.playbackClock(),time=clock?.time;
+      const audio=observed.audio.find(element=>element.duration>=9.9);
+      if(time>=9&&time<10&&audio)observed.tail.push({time,audioClockTime:clock.audioTime,
+        uiTime:Number(slider?.value),audioTime:audio.currentTime,paused:audio.paused,ended:audio.ended});
     },50);
   });
 }
@@ -93,8 +95,20 @@ test('all seventeen clips traverse native EOF and retain soundtrack playback thr
   const selected=page.getByRole('button',{name:'Edit segment 9',exact:true});await selected.click();
   await expect(selected).toHaveAttribute('aria-pressed','true');
   await page.getByRole('button',{name:'Play preview',exact:true}).click();
-  await expect.poll(()=>page.evaluate(()=>window.sequencePlayback.tail.some(sample=>!sample.paused&&!sample.ended&&Math.abs(sample.audioTime-sample.time)<.2)),
-    {timeout:25000,intervals:[50]}).toBe(true);
+  try{
+    await expect.poll(()=>page.evaluate(()=>window.sequencePlayback.tail.some(sample=>!sample.paused&&!sample.ended&&Math.abs(sample.audioTime-sample.audioClockTime)<.2)),
+      {timeout:25000,intervals:[50]}).toBe(true);
+  }catch(error){
+    const diagnostic=await page.evaluate(()=>({clock:window.__clipbraidE2E.playbackClock(),
+      uiTime:Number(document.querySelector('input[aria-label="Playhead time"]').value),
+      tail:window.sequencePlayback.tail.slice(-40),alert:document.querySelector('[role="alert"]')?.textContent,
+      audio:window.sequencePlayback.audio.map(audio=>({time:audio.currentTime,duration:audio.duration,paused:audio.paused,ended:audio.ended,error:audio.error?.message})),
+      videos:window.sequencePlayback.videos.map(video=>({time:video.currentTime,duration:video.duration,paused:video.paused,ended:video.ended,ready:video.readyState,plays:video.sequencePlayCalls,ends:video.sequenceEndedEvents,error:video.error?.message}))
+    })).catch(captureError=>({captureError:String(captureError)}));
+    console.log(JSON.stringify({nativeSequenceTailFailure:diagnostic}));
+    await info.attach('native-sequence-tail-failure',{body:JSON.stringify(diagnostic),contentType:'application/json'});
+    throw error;
+  }
   await expect(page.getByRole('button',{name:'Play preview',exact:true})).toBeVisible({timeout:10000});
   await expect.poll(()=>page.evaluate(()=>window.sequencePlayback.audio.every(audio=>audio.paused))).toBe(true);
   const result=await page.evaluate(()=>({time:Number(document.querySelector('input[aria-label="Playhead time"]').value),
