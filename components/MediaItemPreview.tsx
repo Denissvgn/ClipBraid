@@ -33,17 +33,20 @@ export const MediaItemPreview = memo(({ asset, url, currentTime, isPlaying, fitM
         time: number;
         duration: number;
     } | null>(null);
+    const sourceEnded = useRef(false);
     useEffect(() => {
         const video = videoRef.current;
         if (asset.type !== "video" || !video || !registerVideo)
             return;
         presentedFrame.current = null;
+        sourceEnded.current = false;
         let previous: VideoFrameCallbackMetadata | undefined;
         let frameDuration = 1 / (asset.sourceFps || 30);
         const unregister = registerVideo(asset.id, {
             start: asset.startTime, end: asset.startTime + asset.duration, sourceStart: asset.trimStart,
             frame: () => presentedFrame.current,
-            reset: () => { presentedFrame.current = null; previous = undefined; },
+            ended: () => sourceEnded.current,
+            reset: () => { presentedFrame.current = null; sourceEnded.current = false; previous = undefined; },
         });
         let callback: number;
         const presented: VideoFrameRequestCallback = (_now, metadata) => {
@@ -54,6 +57,8 @@ export const MediaItemPreview = memo(({ asset, url, currentTime, isPlaying, fitM
                     frameDuration = interval;
             }
             presentedFrame.current = { time: metadata.mediaTime, duration: frameDuration };
+            if (video.ended && !video.error)
+                sourceEnded.current = true;
             previous = metadata;
             callback = video.requestVideoFrameCallback(presented);
         };
@@ -92,11 +97,20 @@ export const MediaItemPreview = memo(({ asset, url, currentTime, isPlaying, fitM
             previousSeek.current = seekRevision;
             const moved = previousPlacement.current.start !== asset.startTime || previousPlacement.current.trim !== asset.trimStart;
             previousPlacement.current = { start: asset.startTime, trim: asset.trimStart };
-            if (seeked || moved)
+            if (seeked || moved) {
                 presentedFrame.current = null;
+                sourceEnded.current = false;
+            }
+            if (video.ended && !video.error && presentedFrame.current)
+                sourceEnded.current = true;
             const isActive = isIntervalActive(asset, timeAt?.() ?? currentTime);
             if (isActive) {
                 if (isPlaying) {
+                    if (sourceEnded.current) {
+                        if (video.playbackRate !== 1)
+                            video.playbackRate = 1;
+                        return;
+                    }
                     if (video.paused || seeked || moved) {
                         video.currentTime = target;
                     }
@@ -189,7 +203,8 @@ export const MediaItemPreview = memo(({ asset, url, currentTime, isPlaying, fitM
     if (!url)
         return null;
     if (asset.type === "video") {
-        return (<video ref={videoRef} src={url} style={style} muted playsInline disablePictureInPicture preload="auto" onError={() => failure("A visual could not play. Check the source or press Play to retry.")} onWaiting={() => { clearTimeout(waiting.current); waiting.current = setTimeout(() => { if (videoRef.current && videoRef.current.readyState < 3)
+        return (<video ref={videoRef} src={url} style={style} muted playsInline disablePictureInPicture preload="auto" onEnded={() => { if (videoRef.current?.ended && !videoRef.current.error && presentedFrame.current)
+            sourceEnded.current = true; }} onError={() => failure("A visual could not play. Check the source or press Play to retry.")} onWaiting={() => { clearTimeout(waiting.current); waiting.current = setTimeout(() => { if (videoRef.current && videoRef.current.readyState < 3)
             failure("Visual playback stalled. Check the source and press Play to retry."); }, 2000); }} onPlaying={() => clearTimeout(waiting.current)} onLoadedMetadata={() => {
                 if (videoRef.current) {
                     videoRef.current.currentTime = Math.max(asset.trimStart, localTime);

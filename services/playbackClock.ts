@@ -24,6 +24,7 @@ export interface VideoProgress {
         time: number;
         duration: number;
     } | null;
+    ended?(): boolean;
     reset(): void;
 }
 /** One transport clock, advanced by Web Audio time. React/UI publishes at most
@@ -33,6 +34,7 @@ export class PlaybackClock {
     private listeners = new Set<() => void>();
     private state: PlaybackState = { time: 0, playing: false, preparing: false, error: null, notice: null };
     private position = 0;
+    private presentedPosition = 0;
     private anchor = 0;
     private duration = 0;
     private generation = 0;
@@ -50,37 +52,44 @@ export class PlaybackClock {
     getSnapshot = () => this.state;
     registerVideo = (id: string, progress: VideoProgress) => { this.videos.set(id, progress); return () => { if (this.videos.get(id) === progress)
         this.videos.delete(id); }; };
+    getAudioTime = () => {
+        if (!this.state.playing || !this.context)
+            return this.position;
+        return Math.min(this.duration, Math.max(this.position,
+            this.position + this.outputTime(this.context) - this.anchor));
+    };
     getTime = () => {
         if (!this.state.playing || !this.context)
             return this.position;
-        const output = this.outputTime(this.context), desired = Math.min(this.duration, Math.max(this.position, this.position + output - this.anchor));
+        const desired = Math.min(this.duration, Math.max(this.presentedPosition, this.getAudioTime()));
         let ceiling = this.duration, floor = 0;
         for (const progress of this.videos.values())
-            if (progress.end > this.position + 1e-6 && progress.start < desired) {
-                const frame = progress.frame(), through = frame ? progress.start + frame.time - progress.sourceStart + frame.duration + .005 : progress.start;
-                ceiling = Math.min(ceiling, Math.max(this.position, Math.min(progress.end, through)));
+            if (progress.end > this.presentedPosition + 1e-6 && progress.start < desired) {
+                const frame = progress.frame();
+                // Native EOF can follow the last frame's estimated interval.
+                // Its final image covers the remaining selected clip tail.
+                const through = frame ? (progress.ended?.() ? progress.end
+                    : progress.start + frame.time - progress.sourceStart + frame.duration + .005) : progress.start;
+                ceiling = Math.min(ceiling, Math.max(this.presentedPosition, Math.min(progress.end, through)));
                 if (frame)
                     floor = Math.max(floor, progress.start + frame.time - progress.sourceStart - .015);
             }
-        // Native decoders can advance while the page misses a display callback.
-        // Keep the audio-paced transport within the delivered visual interval,
-        // dropping wait time and correcting accumulated phase error in either direction.
+        // Bound presentation by delivered frames without rebasing the audio
+        // anchor: ordinary frame waits must not discard soundtrack time.
         const allowed = Math.min(ceiling, Math.max(desired, floor));
-        if (allowed !== desired) {
-            this.position = allowed;
-            this.anchor = output;
-        }
+        this.presentedPosition = allowed;
         return allowed;
     };
-    observe = () => ({ time: this.getTime(), playing: this.state.playing, preparing: this.state.preparing, owner: "audio-output-clock", contextState: this.context?.state ?? "not-created", outputLatency: this.context?.outputLatency ?? null });
+    observe = () => ({ time: this.getTime(), audioTime: this.getAudioTime(), playing: this.state.playing, preparing: this.state.preparing, owner: "audio-output-clock", contextState: this.context?.state ?? "not-created", outputLatency: this.context?.outputLatency ?? null });
     setDuration = (duration: number) => { this.duration = Number.isFinite(duration) && duration > 0 ? duration : 0; if (this.getTime() >= this.duration) {
         this.position = this.duration;
+        this.presentedPosition = this.position;
         this.pause();
     }
     else if (this.position > this.duration)
         this.seek(this.duration); };
     seek = (time: number) => { for (const progress of this.videos.values())
-        progress.reset(); this.position = Math.min(this.duration, Math.max(0, Number.isFinite(time) ? time : 0)); this.anchor = this.context ? this.outputTime(this.context) : 0; this.progressTime = this.position; this.progressStamp = performance.now(); this.publish({ time: this.position }); };
+        progress.reset(); this.position = Math.min(this.duration, Math.max(0, Number.isFinite(time) ? time : 0)); this.presentedPosition = this.position; this.anchor = this.context ? this.outputTime(this.context) : 0; this.progressTime = this.position; this.progressStamp = performance.now(); this.publish({ time: this.position }); };
     play = async () => {
         if (this.state.playing || this.state.preparing || this.duration <= 0)
             return;
@@ -134,6 +143,7 @@ export class PlaybackClock {
             if (this.position >= this.duration)
                 this.seek(0);
             this.anchor = this.outputTime(context);
+            this.presentedPosition = this.position;
             this.progressTime = this.position;
             this.progressStamp = performance.now();
             this.lastPublish = -Infinity;
@@ -152,6 +162,7 @@ export class PlaybackClock {
     };
     pause = (notice: string | null = null) => {
         this.position = this.getTime();
+        this.presentedPosition = this.position;
         this.generation++;
         this.cancelStart?.();
         this.cancelStart = null;

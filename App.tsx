@@ -1155,7 +1155,7 @@ export default function App() {
         currentTime={currentTime}
         isPlaying={isPlaying}
         seekRevision={seekRevision}
-        timeAt={playbackClock.getTime} onPlaybackError={playbackFailure}
+        timeAt={playbackClock.getAudioTime} onPlaybackError={playbackFailure}
       />
       <input
         type="file"

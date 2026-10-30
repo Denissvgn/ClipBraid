@@ -62,11 +62,12 @@ test("preview and encoded output reveal a still-active clip after its short over
   expect(pixel[0]).toBeGreaterThan(220);expect(pixel[1]).toBeLessThan(30);expect(pixel[2]).toBeLessThan(30);
   await info.attach("overlay-return-pixels",{body:JSON.stringify({preview,encoded:pixel}),contentType:"application/json"});
 });
-test("profile frame counts, rational rates and framing survive real encoding", async ({ page, context }, info) => {
-  test.setTimeout(120_000); await openEditor(page);
+for (const file of ["rate-23976.mp4", "rate-24.mp4", "rate-2997.mp4", "rate-30.mp4", "rate-60.mp4", "vfr.mp4", "sar-wide.mp4", "rotated-av.mp4", "portrait-blue.png"]) {
+test(`profile frame counts, rational rates and framing survive real encoding: ${file}`, async ({ page, context }, info) => {
+  await openEditor(page);
   const probe=await openProbe(context);
   const evidence = [];
-  for (const file of ["rate-23976.mp4", "rate-24.mp4", "rate-2997.mp4", "rate-30.mp4", "rate-60.mp4", "vfr.mp4", "sar-wide.mp4", "rotated-av.mp4", "portrait-blue.png"]) {
+    console.log(JSON.stringify({fidelityFile:file,event:"starting"}));
     await loadDraft(page, draft([await asset(file, { filter: file.endsWith(".png") ? "grayscale" : "none", hasAudio: false })]));
     await page.getByRole("button", { name: "draft", exact: true }).click();
     const ready = page.waitForEvent("download"); await page.getByRole("button", { name: "Export video", exact: true }).click();
@@ -88,10 +89,11 @@ test("profile frame counts, rational rates and framing survive real encoding", a
       else expect(Math.max(...pixel.left.slice(0,3))).toBeLessThan(10);
     }
     evidence.push({ file, profile, stream: video, duration: metadata.duration });
-  }
+    console.log(JSON.stringify({fidelityFile:file,event:"complete"}));
   await probe.close();
   await info.attach("fidelity-matrix", { body: JSON.stringify(evidence), contentType: "application/json" });
 });
+}
 
 
 test("physical sync fixture has two aligned flash and beep markers",async({context},info)=>{

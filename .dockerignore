@@ -122,6 +122,7 @@
 !services/sourceAudio.ts
 !services/timeline.ts
 !tests/browser/adapters.spec.mjs
+!tests/browser/audio-continuity.spec.mjs
 !tests/browser/audio-windows.spec.mjs
 !tests/browser/audio.spec.mjs
 !tests/browser/cancellation.spec.mjs

@@ -15,11 +15,18 @@ interface AudioEngineProps {
 }
 const releaseAudio = (audio: HTMLAudioElement) => {
     audio.pause();
+    audio.playbackRate = 1;
     audio.removeAttribute("src");
     audio.load();
 };
 export const AudioEngine = memo(({ audioTracks = [], mediaAssets = [], sourceUrl, currentTime = 0, isPlaying = false, seekRevision = 0, timeAt, onPlaybackError, }: AudioEngineProps) => {
     const audioRefs = useRef<Map<string, HTMLAudioElement>>(new Map());
+    const driftStates = useRef(new WeakMap<HTMLAudioElement, {
+        positionedAt: number;
+        correction: number;
+        recoveryBlocked: boolean;
+        alignedSince: number | null;
+    }>());
     const latest = useRef({ isPlaying, onPlaybackError });
     latest.current = { isPlaying, onPlaybackError };
     const desired = useRef(new Map<string, {
@@ -79,6 +86,7 @@ export const AudioEngine = memo(({ audioTracks = [], mediaAssets = [], sourceUrl
             if (url && !audioRefs.current.has(track.id)) {
                 const audio = new Audio(url);
                 audio.loop = false;
+                audio.preservesPitch = true;
                 audio.preload = "auto";
                 configure(track.id, audio);
                 audioRefs.current.set(track.id, audio);
@@ -91,6 +99,7 @@ export const AudioEngine = memo(({ audioTracks = [], mediaAssets = [], sourceUrl
                 if (url && !audioRefs.current.has(asset.id)) {
                     const audio = new Audio(url);
                     audio.loop = false;
+                    audio.preservesPitch = true;
                     audio.preload = "auto";
                     configure(asset.id, audio);
                     audioRefs.current.set(asset.id, audio);
@@ -127,19 +136,64 @@ export const AudioEngine = memo(({ audioTracks = [], mediaAssets = [], sourceUrl
                 const before = previousMapping.current.get(id);
                 const moved = !before || before.start !== start || before.source !== source;
                 nextMapping.set(id, { start, source });
+                let driftState = driftStates.current.get(audio);
+                if (!driftState) {
+                    driftState = { positionedAt: -Infinity, correction: 0, recoveryBlocked: false, alignedSince: null };
+                    driftStates.current.set(audio, driftState);
+                }
+                const rate = (value: number) => {
+                    if (audio.playbackRate !== value)
+                        audio.playbackRate = value;
+                };
+                const position = (recovering = false) => {
+                    rate(1);
+                    driftState.correction = 0;
+                    driftState.positionedAt = performance.now();
+                    driftState.recoveryBlocked = recovering;
+                    driftState.alignedSince = null;
+                    audio.currentTime = target;
+                };
                 const ended = (Number.isFinite(audio.duration) && target >= audio.duration)
                     || (audio.ended && target >= audio.currentTime - 1e-6);
                 if (!active || !isPlaying || ended) {
+                    rate(1);
+                    driftState.correction = 0;
                     if (!audio.paused)
                         audio.pause();
                     if (active && !ended && Math.abs(audio.currentTime - target) > 1e-6)
-                        audio.currentTime = target;
+                        position();
                     return;
                 }
-                // Drift tolerance applies only during continuous playback. A new
-                // source/start or explicit seek must honor even a very short trim.
-                if (audio.paused || seeked || moved || (!audio.seeking && Math.abs(audio.currentTime - target) > 0.02))
-                    audio.currentTime = target;
+                // Explicit positioning honors short trims. Continuous playback
+                // settles clock drift without repeatedly flushing native decoding.
+                if (audio.paused || seeked || moved || (!timeAt && !audio.seeking && Math.abs(audio.currentTime - target) > 0.02)) {
+                    position();
+                } else if (!audio.seeking && audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA
+                    && performance.now() - driftState.positionedAt >= 250) {
+                    const drift = target - audio.currentTime;
+                    const now = performance.now();
+                    if (Math.abs(drift) <= 0.03) {
+                        driftState.alignedSince ??= now;
+                        if (now - driftState.alignedSince >= 1000)
+                            driftState.recoveryBlocked = false;
+                    } else {
+                        driftState.alignedSince = null;
+                    }
+                    // A slow output device must not turn recovery into a seek loop.
+                    if (Math.abs(drift) > 0.25 && !driftState.recoveryBlocked && now - driftState.positionedAt >= 750) {
+                        position(true);
+                    } else {
+                        if (Math.abs(drift) <= 0.01 || drift * driftState.correction < 0)
+                            driftState.correction = 0;
+                        if (Math.abs(drift) > 0.03)
+                            driftState.correction = Math.sign(drift);
+                        rate(1 + 0.04 * driftState.correction);
+                    }
+                } else {
+                    rate(1);
+                    driftState.correction = 0;
+                    driftState.alignedSince = null;
+                }
                 if (audio.error) {
                     failure(id, audio, "A soundtrack is unavailable for preview. Check the source or try Play again.");
                     return;
