@@ -52,10 +52,16 @@ export class PlaybackClock {
     getSnapshot = () => this.state;
     registerVideo = (id: string, progress: VideoProgress) => { this.videos.set(id, progress); return () => { if (this.videos.get(id) === progress)
         this.videos.delete(id); }; };
+    getAudioTime = () => {
+        if (!this.state.playing || !this.context)
+            return this.position;
+        return Math.min(this.duration, Math.max(this.position,
+            this.position + this.outputTime(this.context) - this.anchor));
+    };
     getTime = () => {
         if (!this.state.playing || !this.context)
             return this.position;
-        const output = this.outputTime(this.context), desired = Math.min(this.duration, Math.max(this.presentedPosition, this.position + output - this.anchor));
+        const desired = Math.min(this.duration, Math.max(this.presentedPosition, this.getAudioTime()));
         let ceiling = this.duration, floor = 0;
         for (const progress of this.videos.values())
             if (progress.end > this.presentedPosition + 1e-6 && progress.start < desired) {
@@ -74,7 +80,7 @@ export class PlaybackClock {
         this.presentedPosition = allowed;
         return allowed;
     };
-    observe = () => ({ time: this.getTime(), playing: this.state.playing, preparing: this.state.preparing, owner: "audio-output-clock", contextState: this.context?.state ?? "not-created", outputLatency: this.context?.outputLatency ?? null });
+    observe = () => ({ time: this.getTime(), audioTime: this.getAudioTime(), playing: this.state.playing, preparing: this.state.preparing, owner: "audio-output-clock", contextState: this.context?.state ?? "not-created", outputLatency: this.context?.outputLatency ?? null });
     setDuration = (duration: number) => { this.duration = Number.isFinite(duration) && duration > 0 ? duration : 0; if (this.getTime() >= this.duration) {
         this.position = this.duration;
         this.presentedPosition = this.position;

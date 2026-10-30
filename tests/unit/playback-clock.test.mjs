@@ -41,6 +41,30 @@ test('a seek before a future clip remains audio paced and removing it releases t
   remove();step(.2);assert(Math.abs(clock.getTime()-10.4)<1e-9);
 });
 
+test('frame-constrained presentation cannot rewind or hold the audio transport',async()=>{
+  const {clock,context,step}=setup();let frame={time:0,duration:1/30};
+  clock.registerVideo('clip',{start:0,end:3,sourceStart:0,frame:()=>frame,reset:()=>{frame=null}});
+  await clock.play();step(.2);
+  assert(clock.getTime()<.04);
+  assert.equal(clock.getAudioTime(),context.currentTime);
+  for(let read=0;read<20;read++)clock.getTime();
+  assert.equal(clock.getAudioTime(),.2);
+  frame={time:.3,duration:1/30};assert(clock.getTime()>=.285);
+  assert.equal(clock.getAudioTime(),.2,'A leading video frame cannot advance soundtrack time either.');
+  step(.2);assert.equal(clock.getAudioTime(),.4);
+  clock.dispose();
+});
+
+test('the audio transport preserves explicit pause, resume, seek and duration bounds',async()=>{
+  const {clock,context,step}=setup();await clock.play();step(1);
+  assert.equal(clock.getAudioTime(),1);clock.pause();context.currentTime+=5;
+  assert.equal(clock.getAudioTime(),1);await clock.play();step(.25);
+  assert.equal(clock.getAudioTime(),1.25);clock.seek(20);step(.5);
+  assert.equal(clock.getAudioTime(),20.5);clock.setDuration(20);
+  assert.equal(clock.getAudioTime(),20);assert.equal(clock.getSnapshot().playing,false);
+  clock.dispose();
+});
+
 test('successful source exhaustion releases the final frame tail without jumping across the cut',async()=>{
   const {clock,step}=setup();clock.seek(9.9);
   let ended=false,nextFrame={time:0,duration:1/30};

@@ -67,6 +67,7 @@ test("profile frame counts, rational rates and framing survive real encoding", a
   const probe=await openProbe(context);
   const evidence = [];
   for (const file of ["rate-23976.mp4", "rate-24.mp4", "rate-2997.mp4", "rate-30.mp4", "rate-60.mp4", "vfr.mp4", "sar-wide.mp4", "rotated-av.mp4", "portrait-blue.png"]) {
+    console.log(JSON.stringify({fidelityFile:file,event:"starting"}));
     await loadDraft(page, draft([await asset(file, { filter: file.endsWith(".png") ? "grayscale" : "none", hasAudio: false })]));
     await page.getByRole("button", { name: "draft", exact: true }).click();
     const ready = page.waitForEvent("download"); await page.getByRole("button", { name: "Export video", exact: true }).click();
@@ -88,6 +89,7 @@ test("profile frame counts, rational rates and framing survive real encoding", a
       else expect(Math.max(...pixel.left.slice(0,3))).toBeLessThan(10);
     }
     evidence.push({ file, profile, stream: video, duration: metadata.duration });
+    console.log(JSON.stringify({fidelityFile:file,event:"complete"}));
   }
   await probe.close();
   await info.attach("fidelity-matrix", { body: JSON.stringify(evidence), contentType: "application/json" });

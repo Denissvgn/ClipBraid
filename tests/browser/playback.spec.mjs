@@ -134,3 +134,35 @@ test('seeking back into an exhausted mounted clip clears completion and traverse
   expect(result.videos[1].endedEvents).toBe(before.secondEnded+1);
   await expect(page.getByRole('alert')).toHaveCount(0);
 });
+
+test('delayed visual frame observations cannot rewind the soundtrack transport',async({page},info)=>{
+  await observeNativeSequence(page);
+  await page.addInitScript(()=>{
+    const request=HTMLVideoElement.prototype.requestVideoFrameCallback;
+    const cancel=HTMLVideoElement.prototype.cancelVideoFrameCallback;
+    const pending=new WeakMap();
+    HTMLVideoElement.prototype.requestVideoFrameCallback=function(callback){
+      let timers=pending.get(this);if(!timers){timers=new Map();pending.set(this,timers)}
+      const id=request.call(this,(now,metadata)=>{
+        timers.set(id,setTimeout(()=>{timers.delete(id);callback(now,metadata)},500));
+      });
+      return id;
+    };
+    HTMLVideoElement.prototype.cancelVideoFrameCallback=function(id){
+      const timers=pending.get(this);clearTimeout(timers?.get(id));timers?.delete(id);cancel.call(this,id);
+    };
+  });
+  await openEditor(page);
+  await loadDraft(page,draft([await asset('sync-markers.mp4',{duration:3,originalDuration:3,
+    sourceFps:30,hasAudio:false,muted:true})],[toneTrack(3)]));
+  await page.getByRole('button',{name:'Play preview',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.__clipbraidE2E.playbackClock().audioTime),{intervals:[25]}).toBeGreaterThan(1.5);
+  const result=await page.evaluate(()=>({clock:window.__clipbraidE2E.playbackClock(),
+    audio:window.sequencePlayback.audio.find(audio=>audio.duration>=2.9)?.currentTime,
+    playing:window.sequencePlayback.audio.some(audio=>!audio.paused)}));
+  await info.attach('audio-transport-during-frame-delay',{body:JSON.stringify(result),contentType:'application/json'});
+  expect(result.clock.audioTime-result.clock.time).toBeGreaterThan(.25);
+  expect(result.playing).toBe(true);
+  expect(Math.abs(result.audio-result.clock.audioTime)).toBeLessThan(.2);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});
