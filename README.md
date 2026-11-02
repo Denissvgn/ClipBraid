@@ -114,6 +114,11 @@ Required checks use the pinned npm packages and Chromium; native `ffmpeg` and
 and native FFmpeg with the features listed in that script. Review changed fixture
 hashes before accepting a regenerated inventory.
 
+## Support ClipBraid
+
+If ClipBraid is useful to you, [sponsor its development on GitHub](https://github.com/sponsors/Denissvgn).
+Your support helps fund ongoing maintenance and improvements.
+
 ## License
 
 Project source and original artwork are [MIT licensed](LICENSE).
