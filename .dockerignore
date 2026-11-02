@@ -2,6 +2,7 @@
 # Allow only the public build inputs. Do not add broad directory exceptions.
 **
 !.dockerignore
+!.github/FUNDING.yml
 !.github/workflows/checks.yml
 !.github/workflows/container.yml
 !.gitignore
